@@ -124,8 +124,11 @@ function showLogin() {
     <label>Email</label><input id="em" type="email" autocomplete="username">
     <label>Password</label><input id="pw" type="password" autocomplete="current-password">
     <button class="btn" id="si">Sign in</button>
-    <h3>New user?</h3>
-    <label>Your name</label><input id="nm">
+    <hr style="margin:18px 0;border:0;border-top:1px solid #ddd">
+    <h3>New user? Create an account</h3>
+    <label>Your name</label><input id="nm" autocomplete="name">
+    <label>Email</label><input id="nem" type="email" autocomplete="off">
+    <label>Choose a password (at least 6 characters)</label><input id="npw" type="password" autocomplete="new-password">
     <button class="btn sec" id="su">Create account</button>
     <p class="mute">After you create an account, Procurement must approve it and give you a role (Users tab). Until then you cannot see any data.</p></div>`;
   $('#si').onclick = async () => {
@@ -133,7 +136,9 @@ function showLogin() {
     if (error) return fail(error); await afterLogin();
   };
   $('#su').onclick = async () => {
-    const { data, error } = await sb.auth.signUp({ email: $('#em').value.trim(), password: $('#pw').value, options: { data: { full_name: $('#nm').value.trim() } } });
+    const nem = $('#nem').value.trim(), npw = $('#npw').value;
+    if (!$('#nm').value.trim() || !nem || !npw) return fail(new Error('Enter your name, email and a password in the New user box'));
+    const { data, error } = await sb.auth.signUp({ email: nem, password: npw, options: { data: { full_name: $('#nm').value.trim() } } });
     if (error) return fail(error);
     if (data.session) await afterLogin(); else toast('Account created. Check your email to confirm, then sign in.');
   };
@@ -192,8 +197,8 @@ async function viewSummary() {
   if (error) throw error;
   const types = s.by_item.map(x => x.item_type);
   const cell = new Map(s.matrix.map(m => [m.property_id + '|' + m.item_type, m.n]));
-  const row = (name, x) => `<tr><td>${esc(name)}</td><td class="num">${x.total}</td><td class="num">${x.working}</td><td class="num">${x.repairable}</td><td class="num">${x.damaged}</td><td class="num">${money(x.cost)}</td></tr>`;
-  const head = first => `<tr><th>${first}</th><th class="num">Total</th><th class="num">Working</th><th class="num">Repairable</th><th class="num">Damaged</th><th class="num">Cost</th></tr>`;
+  const row = (name, x, aud) => `<tr><td>${esc(name)}</td><td class="num">${x.total}</td><td class="num">${x.working}</td><td class="num">${x.repairable}</td><td class="num">${x.damaged}</td>${aud ? `<td class="num">${x.audited}</td><td class="num">${x.total - x.audited}</td>` : ''}<td class="num">${money(x.cost)}</td></tr>`;
+  const head = (first, aud) => `<tr><th>${first}</th><th class="num">Total</th><th class="num">Working</th><th class="num">Repairable</th><th class="num">Damaged</th>${aud ? '<th class="num">Audited</th><th class="num">Not audited</th>' : ''}<th class="num">Cost</th></tr>`;
   const matrix = s.by_property.map(p => `<tr><td>${esc(p.name)}</td>${types.map(t => `<td class="num">${cell.get(p.id + '|' + t) || ''}</td>`).join('')}<td class="num"><b>${p.total}</b></td></tr>`).join('');
   const matrixU = s.unassigned.total ? `<tr><td><i>Unassigned</i></td>${types.map(t => `<td class="num">${cell.get('null|' + t) || ''}</td>`).join('')}<td class="num"><b>${s.unassigned.total}</b></td></tr>` : '';
   view.innerHTML = `
@@ -203,16 +208,19 @@ async function viewSummary() {
       <div class="stat"><b>${s.working}</b><span>Working</span></div>
       <div class="stat"><b>${s.repairable}</b><span>Repairable</span></div>
       <div class="stat"><b>${s.damaged}</b><span>Damaged</span></div>
+      <div class="stat"><b>${s.audited}</b><span>Audited at least once</span></div>
+      <div class="stat"><b>${s.total - s.unassigned.total - s.audited}</b><span>Placed but never audited</span></div>
       <div class="stat"><b>${money(s.cost)}</b><span>Total purchase cost</span></div>
       <div class="stat"><b>${s.warranty_90}</b><span>Warranty ends in 90 days</span></div>
     </div>
-    <div class="card"><h2>Property-wise</h2><div class="tw"><table>${head('Property')}${s.by_property.map(p => row(p.name, p)).join('') || '<tr><td>No properties yet</td></tr>'}${s.unassigned.total ? `<tr><td><i>Unassigned</i></td><td class="num">${s.unassigned.total}</td><td></td><td></td><td></td><td class="num">${money(s.unassigned.cost)}</td></tr>` : ''}</table></div></div>
+    <div class="card"><h2>Property-wise</h2><div class="tw"><table>${head('Property', true)}${s.by_property.map(p => row(p.name, p, true)).join('') || '<tr><td>No properties yet</td></tr>'}${s.unassigned.total ? `<tr><td><i>Unassigned</i></td><td class="num">${s.unassigned.total}</td><td></td><td></td><td></td><td></td><td></td><td class="num">${money(s.unassigned.cost)}</td></tr>` : ''}</table></div></div>
     <div class="card"><h2>Item-wise</h2><div class="tw"><table>${head('Item')}${s.by_item.map(i => row(i.item_type, i)).join('') || '<tr><td>No assets yet</td></tr>'}</table></div></div>
     <div class="card"><h2>Property x Item (count)</h2><div class="tw"><table><tr><th>Property</th>${types.map(t => `<th class="num">${esc(t)}</th>`).join('')}<th class="num">Total</th></tr>${matrix}${matrixU}</table></div></div>`;
 }
 
 /* ---------- Asset list (paged, filtered in the database) + bulk assign ---------- */
-const L = { page: 0, q: '', fp: '', ft: '', fs: '' };
+const L = { page: 0, q: '', fp: '', ft: '', fs: '', fa: '', fd: '' };   // fa: '' | yes | no | before (with date fd)
+const auditArgs = () => (L.fa === 'yes' || L.fa === 'no') ? { audit: L.fa, before: null } : (L.fa === 'before' && /^\d{4}-\d{2}-\d{2}$/.test(L.fd) ? { audit: 'before', before: L.fd } : { audit: null, before: null });
 const SEL = new Set();   // ticked unassigned assets (bulk assign)
 const BULK_CHUNK = 2000; // assets per request when bulk assigning
 const searchText = () => { const t = L.q.trim(); return /^(?:ast-?)?0*\d+$/i.test(t) ? '' : t.replace(/[,()%*]/g, ' ').trim(); };
@@ -220,6 +228,10 @@ function applyFilters(q) {
   if (L.fp === '__none') q = q.is('property_id', null); else if (L.fp) q = q.eq('property_id', L.fp);
   if (L.ft) q = q.eq('item_type', L.ft);
   if (L.fs) q = q.eq('status', L.fs);
+  const au = auditArgs();
+  if (au.audit === 'yes') q = q.not('last_audited_at', 'is', null);
+  else if (au.audit === 'no') q = q.is('last_audited_at', null);
+  else if (au.audit === 'before') q = q.or(`last_audited_at.is.null,last_audited_at.lt.${au.before}`);
   const t = L.q.trim();
   if (t) {
     const n = t.match(/^(?:ast-?)?0*(\d+)$/i);
@@ -240,6 +252,7 @@ const naturalRooms = pid => S.rooms.filter(r => r.property_id === pid).sort((a, 
 async function viewAssets() {
   if (!S.types) await loadTypes();
   const bulkOn = () => L.fp === '__none' && canEdit();
+  const canDel = can('procurement');
   view.innerHTML = `<div class="card">
     <h2>Assets ${canEdit() ? '<button class="btn" id="add" style="float:right;margin:0">+ Add asset</button>' : ''}</h2>
     <div class="row">
@@ -247,8 +260,11 @@ async function viewAssets() {
       <div><label>Property</label><select id="fp"><option value="">All</option><option value="__none" ${L.fp === '__none' ? 'selected' : ''}>Unassigned (not placed yet)</option>${S.props.map(p => `<option value="${p.id}" ${p.id === L.fp ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></div>
       <div><label>Item</label><select id="ft"><option value="">All</option>${S.types.map(t => `<option ${t === L.ft ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></div>
       <div><label>Status</label><select id="fs"><option value="">All</option>${STATUSES.map(s => `<option value="${s}" ${s === L.fs ? 'selected' : ''}>${cap(s)}</option>`).join('')}</select></div>
+      <div><label>Audit</label><select id="fa"><option value="">All</option><option value="yes" ${L.fa === 'yes' ? 'selected' : ''}>Audited at least once</option><option value="no" ${L.fa === 'no' ? 'selected' : ''}>Never audited</option><option value="before" ${L.fa === 'before' ? 'selected' : ''}>Not audited since...</option></select></div>
+      <div id="fdbox" style="${L.fa === 'before' ? '' : 'display:none'}"><label>Date</label><input id="fd" type="date" value="${esc(L.fd)}"></div>
     </div></div>
     <div id="bulkbox"></div>
+    <div id="delbox"></div>
     <div class="card">
     <p class="mute" id="count"></p>
     <div class="tw"><table><thead id="thead"></thead><tbody id="rows"></tbody></table></div>
@@ -256,17 +272,17 @@ async function viewAssets() {
   if ($('#add')) $('#add').onclick = () => go('#/form');
 
   const draw = async () => {
-    const sel = bulkOn();
+    const sel = bulkOn() || canDel;
     const from = L.page * PAGE;
     const { data, count, error } = await applyFilters(sb.from('assets').select('*', { count: 'exact' })).order('tag_no').range(from, from + PAGE - 1);
     if (error) return fail(error);
-    $('#thead').innerHTML = `<tr>${sel ? '<th><input type="checkbox" id="selall" title="Tick all on this page"></th>' : ''}<th>Tag</th><th>Item</th><th>Description</th><th>Property</th><th>Room</th><th>Status</th><th>Warranty</th></tr>`;
+    $('#thead').innerHTML = `<tr>${sel ? '<th><input type="checkbox" id="selall" title="Tick all on this page"></th>' : ''}<th>Tag</th><th>Item</th><th>Description</th><th>Property</th><th>Room</th><th>Status</th><th>Last audited</th><th>Warranty</th></tr>`;
     $('#count').textContent = count === 0 ? 'No assets match.' : `Showing ${from + 1}-${from + data.length} of ${count}`;
-    $('#rows').innerHTML = data.map(a => `<tr class="click" data-id="${a.id}">${sel ? `<td><input type="checkbox" class="sel" data-id="${a.id}" ${SEL.has(a.id) ? 'checked' : ''}></td>` : ''}<td>${tagOf(a)}</td><td>${esc(a.item_type)}</td><td>${esc(a.description)}</td><td>${esc(propName(a.property_id))}</td><td>${esc(roomLabel(a))}</td><td>${badge(a.status)}</td><td>${esc(warrantyText(a))}</td></tr>`).join('');
+    $('#rows').innerHTML = data.map(a => `<tr class="click" data-id="${a.id}">${sel ? `<td><input type="checkbox" class="sel" data-id="${a.id}" ${SEL.has(a.id) ? 'checked' : ''}></td>` : ''}<td>${tagOf(a)}</td><td>${esc(a.item_type)}</td><td>${esc(a.description)}</td><td>${esc(propName(a.property_id))}</td><td>${esc(roomLabel(a))}</td><td>${badge(a.status)}</td><td>${a.last_audited_at ? esc(new Date(a.last_audited_at).toLocaleDateString()) : '<span class="mute">-</span>'}</td><td>${esc(warrantyText(a))}</td></tr>`).join('');
     $('#prev').disabled = L.page === 0; $('#next').disabled = from + data.length >= count;
     if ($('#selall')) $('#selall').onchange = () => {
       document.querySelectorAll('#rows input.sel').forEach(c => { c.checked = $('#selall').checked; if (c.checked) SEL.add(c.dataset.id); else SEL.delete(c.dataset.id); });
-      updateSelNote();
+      updateSelNote(); updateDelNote();
     };
   };
 
@@ -387,18 +403,84 @@ async function viewAssets() {
     }
   };
 
+  /* ----- bulk delete (Procurement only) ----- */
+  const delFilterActive = () => !!(L.fp || L.ft || L.fs || L.q.trim() || auditArgs().audit);
+  const delArgs = ids => {
+    const t = L.q.trim(), n = t.match(/^(?:ast-?)?0*(\d+)$/i), au = auditArgs();
+    return { p_ids: ids || null, p_property: ids ? null : (L.fp && L.fp !== '__none' ? L.fp : null), p_unassigned: ids ? false : L.fp === '__none',
+      p_item_type: ids ? null : (L.ft || null), p_status: ids ? null : (L.fs || null), p_search: ids ? null : (n ? null : (searchText() || null)),
+      p_tag: ids ? null : (n ? Number(n[1]) : null), p_audit: ids ? null : au.audit, p_before: ids ? null : au.before, p_limit: BULK_CHUNK };
+  };
+  const updateDelNote = async () => {
+    if (!$('#dn')) return;
+    if (SEL.size) { $('#dn').textContent = `${SEL.size} ticked asset(s) will be deleted.`; $('#dgo').disabled = false; return; }
+    if (!delFilterActive()) { $('#dn').textContent = 'Tick rows in the list, or choose at least one filter above. Then every asset matching the filters is deleted.'; $('#dgo').disabled = true; return; }
+    const { count, error } = await applyFilters(sb.from('assets').select('id', { count: 'exact', head: true }));
+    if (error || !$('#dn')) return;
+    $('#dn').textContent = `Nothing ticked: all ${count} asset(s) matching the current filters will be deleted.`; $('#dgo').disabled = !count;
+  };
+  const renderDel = () => {
+    const box = $('#delbox');
+    if (!canDel) { box.innerHTML = ''; return; }
+    box.innerHTML = `<details class="card"><summary><b>Bulk delete (Procurement only)</b></summary>
+      <p class="mute">Permanently deletes the assets and their history. This cannot be undone.</p>
+      <p id="dn" class="mute"></p>
+      <button class="btn red" id="dgo">Delete</button><div id="dres" style="margin-top:10px"></div></details>`;
+    $('#dgo').onclick = runDelete;
+    updateDelNote();
+  };
+  const runDelete = async () => {
+    const btn = $('#dgo');
+    try {
+      let total, ids = null;
+      if (SEL.size) { ids = [...SEL]; total = ids.length; }
+      else {
+        if (!delFilterActive()) return fail(new Error('Tick rows or choose a filter first'));
+        const { count, error } = await applyFilters(sb.from('assets').select('id', { count: 'exact', head: true })); if (error) throw error;
+        total = count;
+      }
+      if (!total) return fail(new Error('Nothing to delete'));
+      const what = ids ? `${total} ticked asset(s)` : `${total} asset(s) matching the current filters`;
+      if (total > 20) {
+        const w = prompt(`This will permanently delete ${what} and their history.\n\nType DELETE to confirm.`);
+        if (w !== 'DELETE') return;
+      } else if (!confirm(`Permanently delete ${what} and their history?`)) return;
+      btn.disabled = true;
+      let done = 0;
+      try {
+        if (ids) {
+          for (let i = 0; i < ids.length; i += BULK_CHUNK) {
+            btn.textContent = `Deleting ${done} of ${total}...`;
+            const { data, error } = await sb.rpc('delete_assets', delArgs(ids.slice(i, i + BULK_CHUNK)));
+            if (error) throw error; done += data || 0;
+          }
+        } else {
+          while (done < total) {
+            btn.textContent = `Deleting ${done} of ${total}...`;
+            const { data, error } = await sb.rpc('delete_assets', delArgs(null));
+            if (error) throw error; if (!data) break; done += data;
+          }
+        }
+      } catch (e) { throw new Error(done ? `Stopped after ${done} asset(s) were deleted: ${e.message || e}` : (e.message || e)); }
+      SEL.clear(); S.types = null; toast(`${done} asset(s) deleted`);
+      viewAssets();
+    } catch (e) { btn.disabled = false; btn.textContent = 'Delete'; fail(e); if ($('#dn')) { draw(); updateDelNote(); } }
+  };
+
   let timer;
-  const changed = () => { SEL.clear(); L.page = 0; updateSelNote(); draw(); updateBulkInfo(); };
+  const changed = () => { SEL.clear(); L.page = 0; updateSelNote(); updateDelNote(); draw(); updateBulkInfo(); };
   $('#q').oninput = () => { clearTimeout(timer); timer = setTimeout(() => { L.q = $('#q').value; changed(); }, 350); };
-  $('#fp').onchange = () => { L.fp = $('#fp').value; SEL.clear(); L.page = 0; renderBulk(); draw(); };
+  $('#fp').onchange = () => { L.fp = $('#fp').value; SEL.clear(); L.page = 0; renderBulk(); updateDelNote(); draw(); };
+  $('#fa').onchange = () => { L.fa = $('#fa').value; $('#fdbox').style.display = L.fa === 'before' ? '' : 'none'; if (L.fa === 'before' && !L.fd) { L.fd = new Date(Date.now() - 365 * 864e5).toISOString().slice(0, 10); $('#fd').value = L.fd; } changed(); };
+  $('#fd').onchange = () => { L.fd = $('#fd').value; changed(); };
   ['ft', 'fs'].forEach(i => { $('#' + i).onchange = () => { L[i] = $('#' + i).value; changed(); }; });
   $('#prev').onclick = () => { L.page--; draw(); }; $('#next').onclick = () => { L.page++; draw(); };
   $('#rows').onclick = e => {
     const cb = e.target.closest('input.sel');
-    if (cb) { if (cb.checked) SEL.add(cb.dataset.id); else SEL.delete(cb.dataset.id); updateSelNote(); return; }
+    if (cb) { if (cb.checked) SEL.add(cb.dataset.id); else SEL.delete(cb.dataset.id); updateSelNote(); updateDelNote(); return; }
     const tr = e.target.closest('tr[data-id]'); if (tr) go('#/asset/' + tr.dataset.id);
   };
-  renderBulk();
+  renderBulk(); renderDel();
   draw();
 }
 
@@ -407,15 +489,22 @@ async function viewAsset(id) {
   const a = await getAsset(id);
   if (!a) { view.innerHTML = '<div class="card">Asset not found. It may have been deleted.</div>'; return; }
   const assigned = !!a.property_id;
-  const { data: mv } = await sb.from('movements').select('*').eq('asset_id', id).order('done_at', { ascending: false }).limit(30);
+  const { data: mv } = await sb.from('movements').select('*').eq('asset_id', id).neq('kind', 'audit').order('done_at', { ascending: false }).limit(30);
+  const { data: au } = await sb.from('movements').select('*').eq('asset_id', id).eq('kind', 'audit').order('done_at', { ascending: false }).limit(50);
   const where = (p, r, st) => !p ? 'Unassigned' : propName(p) + ' / ' + (st ? 'Store' : (roomById(r) || {}).name || '-');
   const moveText = m => m.kind === 'transfer'
     ? 'Moved: ' + where(m.from_property, m.from_room, m.from_store) + ' → ' + where(m.to_property, m.to_room, m.to_store)
     : m.kind === 'assign' ? 'Assigned to ' + where(m.to_property, m.to_room, m.to_store) + ', status ' + m.new_status
       : 'Status: ' + m.old_status + ' → ' + m.new_status;
   const hist = (mv || []).map(m => `<tr><td>${new Date(m.done_at).toLocaleString()}</td><td>${esc(m.done_by_name)}</td><td>${esc(moveText(m))}${m.note ? '<br><span class="mute">' + esc(m.note) + '</span>' : ''}</td></tr>`).join('');
+  const auHist = (au || []).map(m => `<tr><td>${new Date(m.done_at).toLocaleString()}</td><td>${esc(m.done_by_name)}</td><td>Audited OK at ${esc(where(m.to_property, m.to_room, m.to_store))}, status ${esc(m.new_status)}${m.note ? '<br><span class="mute">' + esc(m.note) + '</span>' : ''}</td></tr>`).join('');
 
   const auditCard = `<div class="card"><h2>Audit</h2>
+      <p>${a.last_audited_at ? 'Last audited <b>' + esc(new Date(a.last_audited_at).toLocaleString()) + '</b> by ' + esc(a.last_audited_by) : 'Never audited'}</p>
+      <div class="row"><div><label>Note (optional)</label><input id="aun"></div></div>
+      <button class="btn" id="aud">Audited OK</button>
+      <p class="mute">Press this after you have physically checked the asset. Each press is saved in the audit history with the date, your name, and the place and status recorded at that moment.</p>
+      <h3>Location check</h3>
       <button class="btn sec" id="loc">Check my location</button>
       <p id="locmsg" class="mute">Tap to compare where you are with where this asset is recorded.</p>
       <h3>Change status</h3>
@@ -452,10 +541,12 @@ async function viewAsset(id) {
         <tr><th>Purchase cost</th><td>${money(a.purchase_cost)}</td></tr>
         <tr><th>Vendor</th><td>${esc(a.vendor) || '-'}</td></tr>
         <tr><th>Warranty until</th><td>${esc(warrantyText(a))}</td></tr>
+        <tr><th>Last audited</th><td>${a.last_audited_at ? esc(new Date(a.last_audited_at).toLocaleDateString()) + ' by ' + esc(a.last_audited_by) : '-'}</td></tr>
         <tr><th>Notes</th><td>${esc(a.notes) || '-'}</td></tr></table></div>
       ${canEdit() ? `<button class="btn sec" id="edit">Edit</button>${assigned ? '<button class="btn sec" id="prt">Print QR</button>' : ''}` : ''}
     </div>
     ${assigned ? auditCard : assignCard}
+    ${assigned ? `<div class="card"><h2>Audit history</h2><div class="tw"><table>${auHist || '<tr><td class="mute">Not audited yet.</td></tr>'}</table></div></div>` : ''}
     <div class="card"><h2>History</h2><div class="tw"><table>${hist || '<tr><td class="mute">No changes recorded yet.</td></tr>'}</table></div></div>`;
 
   if ($('#edit')) $('#edit').onclick = () => go('#/form/' + a.id);
@@ -513,6 +604,15 @@ async function viewAsset(id) {
     $('#locmsg').textContent = msg;
   };
 
+  $('#aud').onclick = async () => {
+    try {
+      $('#aud').disabled = true;
+      const pos = await getPos(3000);
+      const { error } = await sb.rpc('audit_asset', { p_asset: a.id, p_note: $('#aun').value.trim() || null, p_lat: pos && pos.lat, p_lng: pos && pos.lng });
+      if (error) throw error;
+      toast('Audited OK saved'); route();
+    } catch (e) { $('#aud').disabled = false; fail(e); }
+  };
   $('#ss').onclick = async () => {
     try {
       const pos = await getPos(3000);
@@ -635,7 +735,7 @@ async function viewForm(id) {
         }
         if (copies === 1) { toast('Saved'); go('#/asset/' + data[0].id); }
         else if (loc.property_id) { S.printPre = { ids: data.map(x => x.id) }; toast(copies + ' assets created. Labels are ready to print.'); go('#/print'); }
-        else { L.fp = '__none'; L.q = ''; L.ft = ''; L.fs = ''; L.page = 0; toast(copies + ' unassigned assets created. Assign each one before printing its label.'); go('#/assets'); }
+        else { L.fp = '__none'; L.q = ''; L.ft = ''; L.fs = ''; L.fa = ''; L.fd = ''; L.page = 0; toast(copies + ' unassigned assets created. Assign each one before printing its label.'); go('#/assets'); }
       }
     } catch (e) { $('#save').disabled = false; $('#save').textContent = 'Save'; fail(e); }
   };
@@ -713,7 +813,7 @@ async function viewPrint(preId) {
   $('#lprev').disabled = true; $('#lnext').disabled = true;
 
   sb.from('assets').select('id', { count: 'exact', head: true }).is('property_id', null).then(({ count }) => {
-    if (count && $('#un')) { $('#un').innerHTML = `<b>${count}</b> asset(s) are waiting to be assigned and cannot print yet. <button class="btn sec" id="seeun" style="margin:0">Show them</button>`; $('#seeun').onclick = () => { L.fp = '__none'; L.q = ''; L.ft = ''; L.fs = ''; L.page = 0; go('#/assets'); }; }
+    if (count && $('#un')) { $('#un').innerHTML = `<b>${count}</b> asset(s) are waiting to be assigned and cannot print yet. <button class="btn sec" id="seeun" style="margin:0">Show them</button>`; $('#seeun').onclick = () => { L.fp = '__none'; L.q = ''; L.ft = ''; L.fs = ''; L.fa = ''; L.fd = ''; L.page = 0; go('#/assets'); }; }
   });
   if (S.props.length) { fillRooms(); await fillAssets(); }
   if (st.ids) {
