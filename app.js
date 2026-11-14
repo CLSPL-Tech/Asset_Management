@@ -497,16 +497,16 @@ async function viewAsset(id) {
     : m.kind === 'assign' ? 'Assigned to ' + where(m.to_property, m.to_room, m.to_store) + ', status ' + m.new_status
       : 'Status: ' + m.old_status + ' → ' + m.new_status;
   const hist = (mv || []).map(m => `<tr><td>${new Date(m.done_at).toLocaleString()}</td><td>${esc(m.done_by_name)}</td><td>${esc(moveText(m))}${m.note ? '<br><span class="mute">' + esc(m.note) + '</span>' : ''}</td></tr>`).join('');
-  const auHist = (au || []).map(m => `<tr><td>${new Date(m.done_at).toLocaleString()}</td><td>${esc(m.done_by_name)}</td><td>Audited OK at ${esc(where(m.to_property, m.to_room, m.to_store))}, status ${esc(m.new_status)}${m.note ? '<br><span class="mute">' + esc(m.note) + '</span>' : ''}</td></tr>`).join('');
+  const auHist = (au || []).map(m => `<tr><td>${new Date(m.done_at).toLocaleString()}</td><td>${esc(m.done_by_name)}</td><td>Audited OK at ${esc(where(m.to_property, m.to_room, m.to_store))}, status ${esc(m.new_status)}${m.loc_verified ? ' <span class="mute">(location verified)</span>' : ' <span class="err">(location not verified)</span>'}${m.note ? '<br><span class="mute">' + esc(m.note) + '</span>' : ''}</td></tr>`).join('');
 
   const auditCard = `<div class="card"><h2>Audit</h2>
-      <p>${a.last_audited_at ? 'Last audited <b>' + esc(new Date(a.last_audited_at).toLocaleString()) + '</b> by ' + esc(a.last_audited_by) : 'Never audited'}</p>
+      <p>${a.last_audited_at ? 'Last audited <b>' + esc(new Date(a.last_audited_at).toLocaleString()) + '</b> by ' + esc(a.last_audited_by) + (a.last_audit_verified ? '' : ' <span class="err">(location not verified)</span>') : 'Never audited'}</p>
+      <div id="geo" class="mute">Checking your location...</div>
+      <div id="xfer"></div>
       <div class="row"><div><label>Note (optional)</label><input id="aun"></div></div>
-      <button class="btn" id="aud">Audited OK</button>
+      <button class="btn" id="aud" disabled>Audited OK</button>
       <p class="mute">Press this after you have physically checked the asset. Each press is saved in the audit history with the date, your name, and the place and status recorded at that moment.</p>
-      <h3>Location check</h3>
-      <button class="btn sec" id="loc">Check my location</button>
-      <p id="locmsg" class="mute">Tap to compare where you are with where this asset is recorded.</p>
+      <button class="btn sec" id="loc">Check my location again</button>
       <h3>Change status</h3>
       <div class="row"><div><label>New status</label><select id="ns">${STATUSES.map(s => `<option value="${s}" ${s === a.status ? 'selected' : ''}>${cap(s)}</option>`).join('')}</select></div>
       <div><label>Note (optional)</label><input id="sn"></div></div>
@@ -541,7 +541,7 @@ async function viewAsset(id) {
         <tr><th>Purchase cost</th><td>${money(a.purchase_cost)}</td></tr>
         <tr><th>Vendor</th><td>${esc(a.vendor) || '-'}</td></tr>
         <tr><th>Warranty until</th><td>${esc(warrantyText(a))}</td></tr>
-        <tr><th>Last audited</th><td>${a.last_audited_at ? esc(new Date(a.last_audited_at).toLocaleDateString()) + ' by ' + esc(a.last_audited_by) : '-'}</td></tr>
+        <tr><th>Last audited</th><td>${a.last_audited_at ? esc(new Date(a.last_audited_at).toLocaleDateString()) + ' by ' + esc(a.last_audited_by) + (a.last_audit_verified ? '' : ' (location not verified)') : '-'}</td></tr>
         <tr><th>Notes</th><td>${esc(a.notes) || '-'}</td></tr></table></div>
       ${canEdit() ? `<button class="btn sec" id="edit">Edit</button>${assigned ? '<button class="btn sec" id="prt">Print QR</button>' : ''}` : ''}
     </div>
@@ -587,22 +587,42 @@ async function viewAsset(id) {
   };
   $('#tp').onchange = fillDest; fillDest();
 
-  $('#loc').onclick = async () => {
-    $('#locmsg').textContent = 'Getting your location...';
-    const pos = await getPos();
-    if (!pos) { $('#locmsg').innerHTML = '<span class="err">Could not get location. Allow location access in the browser.</span>'; return; }
-    const withPin = S.props.filter(p => p.latitude != null && p.longitude != null)
-      .map(p => ({ p, d: distM(pos.lat, pos.lng, p.latitude, p.longitude) })).sort((x, y) => x.d - y.d);
-    if (!withPin.length) { $('#locmsg').textContent = 'No property has a geo location saved yet.'; return; }
-    const near = withPin[0], rec = withPin.find(x => x.p.id === a.property_id);
-    let msg = 'Nearest property to you: ' + near.p.name + ' (' + fmtDist(near.d) + ').';
-    if (rec) msg += ' Recorded property ' + rec.p.name + ' is ' + fmtDist(rec.d) + ' away.';
-    if (near.p.id !== a.property_id && near.d < 500) {
-      msg += ' You appear to be at a different property than recorded - consider a transfer.';
-      $('#tp').value = near.p.id; fillDest();
+  /* Location check: runs when the asset opens. Audited OK is allowed only at the recorded property. */
+  const runGeo = async () => {
+    const geo = $('#geo'), aud = $('#aud'), xf = $('#xfer');
+    aud.disabled = true; xf.innerHTML = ''; geo.className = 'mute'; geo.textContent = 'Checking your location...';
+    const pos = await getPos(8000);
+    if (!$('#geo')) return;
+    const rp = propById(a.property_id), radius = p => p.audit_radius_m || 500, hasPin = p => p && p.latitude != null && p.longitude != null;
+    if (!pos) { geo.textContent = 'Your location is not available. You can still audit, but the entry will be marked "location not verified". Allow location access in the browser to verify.'; aud.disabled = false; return; }
+    const near = S.props.filter(hasPin).map(p => ({ p, d: distM(pos.lat, pos.lng, p.latitude, p.longitude) })).filter(x => x.d <= radius(x.p)).sort((x, y) => x.d - y.d);
+    if (hasPin(rp)) {
+      const d = distM(pos.lat, pos.lng, rp.latitude, rp.longitude);
+      if (d <= radius(rp)) { geo.className = 'ok'; geo.textContent = 'You are at ' + rp.name + ' (' + fmtDist(d) + ' from its pin). You can mark this asset audited.'; aud.disabled = false; return; }
+    } else if (!near.length) {
+      geo.textContent = rp.name + ' has no map pin yet, so your location cannot be verified. You can still audit; the entry will be marked "location not verified".'; aud.disabled = false; return;
     }
-    $('#locmsg').textContent = msg;
+    const other = near.find(x => x.p.id !== a.property_id);
+    if (other) {
+      geo.className = 'err'; geo.innerHTML = 'This asset is recorded at <b>' + esc(rp.name) + '</b>, but you are at <b>' + esc(other.p.name) + '</b>. It needs to be transferred before it can be audited.';
+      const rooms = S.rooms.filter(r => r.property_id === other.p.id);
+      xf.innerHTML = `<div class="row"><div><label>Transfer to ${esc(other.p.name)}: room / store</label><select id="xr"><option value="STORE">Store</option>${rooms.map(r => `<option value="${r.id}">${esc(r.name)}</option>`).join('')}</select></div></div><button class="btn" id="xgo">Transfer to ${esc(other.p.name)} now</button>`;
+      $('#xgo').onclick = async () => {
+        try {
+          $('#xgo').disabled = true;
+          const toStore = $('#xr').value === 'STORE';
+          const { error } = await sb.rpc('transfer_asset', { p_asset: a.id, p_property: other.p.id, p_room: toStore ? null : $('#xr').value, p_to_store: toStore, p_note: 'Transferred during audit', p_lat: pos.lat, p_lng: pos.lng });
+          if (error) throw error;
+          toast('Transferred. You can now audit it.'); route();
+        } catch (e) { $('#xgo').disabled = false; fail(e); }
+      };
+      return;
+    }
+    const d = distM(pos.lat, pos.lng, rp.latitude, rp.longitude);
+    geo.className = 'err'; geo.textContent = 'You are ' + fmtDist(d) + ' from ' + rp.name + '. Audited OK is only allowed within ' + radius(rp) + ' m of the property. Go to the property to audit this asset.';
   };
+  $('#loc').onclick = runGeo;
+  runGeo();
 
   $('#aud').onclick = async () => {
     try {
@@ -1026,8 +1046,8 @@ async function runImport(res) {
 /* ---------- Properties and rooms (Procurement) ---------- */
 function viewProperties() {
   view.innerHTML = `<div class="card"><h2>Properties</h2>
-    <div class="tw"><table><thead><tr><th>Name</th><th>Latitude</th><th>Longitude</th><th>Store location</th><th>Rooms</th><th></th></tr></thead><tbody>
-    ${S.props.map(p => `<tr><td>${esc(p.name)}</td><td>${p.latitude ?? '-'}</td><td>${p.longitude ?? '-'}</td><td>${esc(p.store_location) || '-'}</td><td>${S.rooms.filter(r => r.property_id === p.id).length}</td><td><button class="btn sec" data-e="${p.id}" style="margin:0">Edit</button></td></tr>`).join('') || '<tr><td colspan="6" class="mute">No properties yet.</td></tr>'}
+    <div class="tw"><table><thead><tr><th>Name</th><th>Latitude</th><th>Longitude</th><th>Audit radius</th><th>Store location</th><th>Rooms</th><th></th></tr></thead><tbody>
+    ${S.props.map(p => `<tr><td>${esc(p.name)}</td><td>${p.latitude ?? '-'}</td><td>${p.longitude ?? '-'}</td><td>${p.audit_radius_m || 500} m</td><td>${esc(p.store_location) || '-'}</td><td>${S.rooms.filter(r => r.property_id === p.id).length}</td><td><button class="btn sec" data-e="${p.id}" style="margin:0">Edit</button></td></tr>`).join('') || '<tr><td colspan="6" class="mute">No properties yet.</td></tr>'}
     </tbody></table></div></div>
     <div class="card"><h2 id="ft">Add property</h2>
     <div class="row">
@@ -1035,7 +1055,9 @@ function viewProperties() {
       <div><label>Store location (name or description)</label><input id="ps" placeholder="e.g. Basement store room"></div>
       <div><label>Latitude</label><input id="la" type="number" step="any"></div>
       <div><label>Longitude</label><input id="lo" type="number" step="any"></div>
+      <div><label>Audit radius (metres)</label><input id="rad" type="number" min="50" step="10" value="500"></div>
     </div>
+    <p class="mute">Auditors must be within this distance of the property pin to mark an asset audited. Use a larger value for a big campus.</p>
     <button class="btn sec" id="here">Use my current location</button><button class="btn" id="sp">Save property</button><button class="btn sec" id="np">Clear</button></div>
     <div class="card"><h2>Rooms / areas</h2>
     <label>Property</label><select id="rp">${S.props.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>
@@ -1043,12 +1065,12 @@ function viewProperties() {
     <label>Add rooms (separate with commas or new lines; words like Lobby are fine)</label><textarea id="rn" placeholder="101, 102, Lobby, Gym"></textarea>
     <button class="btn" id="ar">Add rooms</button></div>`;
   let editing = null;
-  const clear = () => { editing = null; ['pn', 'ps', 'la', 'lo'].forEach(i => { $('#' + i).value = ''; }); $('#ft').textContent = 'Add property'; };
+  const clear = () => { editing = null; ['pn', 'ps', 'la', 'lo'].forEach(i => { $('#' + i).value = ''; }); $('#rad').value = 500; $('#ft').textContent = 'Add property'; };
   $('#np').onclick = clear;
   view.onclick = e => {
     const b = e.target.closest('button[data-e]'); if (b) {
       const p = propById(b.dataset.e); editing = p.id; $('#ft').textContent = 'Edit property';
-      $('#pn').value = p.name; $('#ps').value = p.store_location || ''; $('#la').value = p.latitude ?? ''; $('#lo').value = p.longitude ?? '';
+      $('#pn').value = p.name; $('#ps').value = p.store_location || ''; $('#la').value = p.latitude ?? ''; $('#lo').value = p.longitude ?? ''; $('#rad').value = p.audit_radius_m || 500;
       $('#pn').scrollIntoView();
     }
   };
@@ -1060,7 +1082,7 @@ function viewProperties() {
   $('#sp').onclick = async () => {
     try {
       if (!$('#pn').value.trim()) return fail(new Error('Property name is required'));
-      const row = { name: $('#pn').value.trim(), store_location: $('#ps').value.trim() || null, latitude: $('#la').value === '' ? null : Number($('#la').value), longitude: $('#lo').value === '' ? null : Number($('#lo').value) };
+      const row = { name: $('#pn').value.trim(), store_location: $('#ps').value.trim() || null, latitude: $('#la').value === '' ? null : Number($('#la').value), longitude: $('#lo').value === '' ? null : Number($('#lo').value), audit_radius_m: Math.max(50, Math.floor(Number($('#rad').value) || 500)) };
       const { error } = editing ? await sb.from('properties').update(row).eq('id', editing) : await sb.from('properties').insert(row);
       if (error) throw error;
       await loadMaster(); toast('Property saved'); viewProperties();
