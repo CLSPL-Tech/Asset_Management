@@ -27,9 +27,9 @@ const can = (...roles) => roles.includes(S.profile && S.profile.role);
 const canEdit = () => can('procurement', 'projects');
 const propById = id => S.props.find(p => p.id === id);
 const roomById = id => S.rooms.find(r => r.id === id);
-const propName = id => (propById(id) || {}).name || '-';
+const propName = id => !id ? 'Unassigned' : ((propById(id) || {}).name || '-');
 const cap = s => s ? s[0].toUpperCase() + s.slice(1) : '';
-const badge = st => `<span class="badge ${esc(st)}">${esc(cap(st))}</span>`;
+const badge = st => st ? `<span class="badge ${esc(st)}">${esc(cap(st))}</span>` : '<span class="badge unassigned">Unassigned</span>';
 const today = () => new Date().toISOString().slice(0, 10);
 
 function roomLabel(a) {
@@ -193,18 +193,20 @@ async function viewSummary() {
   const row = (name, x) => `<tr><td>${esc(name)}</td><td class="num">${x.total}</td><td class="num">${x.working}</td><td class="num">${x.repairable}</td><td class="num">${x.damaged}</td><td class="num">${money(x.cost)}</td></tr>`;
   const head = first => `<tr><th>${first}</th><th class="num">Total</th><th class="num">Working</th><th class="num">Repairable</th><th class="num">Damaged</th><th class="num">Cost</th></tr>`;
   const matrix = s.by_property.map(p => `<tr><td>${esc(p.name)}</td>${types.map(t => `<td class="num">${cell.get(p.id + '|' + t) || ''}</td>`).join('')}<td class="num"><b>${p.total}</b></td></tr>`).join('');
+  const matrixU = s.unassigned.total ? `<tr><td><i>Unassigned</i></td>${types.map(t => `<td class="num">${cell.get('null|' + t) || ''}</td>`).join('')}<td class="num"><b>${s.unassigned.total}</b></td></tr>` : '';
   view.innerHTML = `
     <div class="stats">
       <div class="stat"><b>${s.total}</b><span>Total assets</span></div>
+      <div class="stat"><b>${s.unassigned.total}</b><span>Unassigned (not placed yet)</span></div>
       <div class="stat"><b>${s.working}</b><span>Working</span></div>
       <div class="stat"><b>${s.repairable}</b><span>Repairable</span></div>
       <div class="stat"><b>${s.damaged}</b><span>Damaged</span></div>
       <div class="stat"><b>${money(s.cost)}</b><span>Total purchase cost</span></div>
       <div class="stat"><b>${s.warranty_90}</b><span>Warranty ends in 90 days</span></div>
     </div>
-    <div class="card"><h2>Property-wise</h2><div class="tw"><table>${head('Property')}${s.by_property.map(p => row(p.name, p)).join('') || '<tr><td>No properties yet</td></tr>'}</table></div></div>
+    <div class="card"><h2>Property-wise</h2><div class="tw"><table>${head('Property')}${s.by_property.map(p => row(p.name, p)).join('') || '<tr><td>No properties yet</td></tr>'}${s.unassigned.total ? `<tr><td><i>Unassigned</i></td><td class="num">${s.unassigned.total}</td><td></td><td></td><td></td><td class="num">${money(s.unassigned.cost)}</td></tr>` : ''}</table></div></div>
     <div class="card"><h2>Item-wise</h2><div class="tw"><table>${head('Item')}${s.by_item.map(i => row(i.item_type, i)).join('') || '<tr><td>No assets yet</td></tr>'}</table></div></div>
-    <div class="card"><h2>Property x Item (count)</h2><div class="tw"><table><tr><th>Property</th>${types.map(t => `<th class="num">${esc(t)}</th>`).join('')}<th class="num">Total</th></tr>${matrix}</table></div></div>`;
+    <div class="card"><h2>Property x Item (count)</h2><div class="tw"><table><tr><th>Property</th>${types.map(t => `<th class="num">${esc(t)}</th>`).join('')}<th class="num">Total</th></tr>${matrix}${matrixU}</table></div></div>`;
 }
 
 /* ---------- Asset list (paged, filtered in the database) ---------- */
@@ -215,7 +217,7 @@ async function viewAssets() {
     <h2>Assets ${canEdit() ? '<button class="btn" id="add" style="float:right;margin:0">+ Add asset</button>' : ''}</h2>
     <div class="row">
       <div><label>Search</label><input id="q" value="${esc(L.q)}" placeholder="tag no., item, description, vendor"></div>
-      <div><label>Property</label><select id="fp"><option value="">All</option>${S.props.map(p => `<option value="${p.id}" ${p.id === L.fp ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></div>
+      <div><label>Property</label><select id="fp"><option value="">All</option><option value="__none" ${L.fp === '__none' ? 'selected' : ''}>Unassigned (not placed yet)</option>${S.props.map(p => `<option value="${p.id}" ${p.id === L.fp ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></div>
       <div><label>Item</label><select id="ft"><option value="">All</option>${S.types.map(t => `<option ${t === L.ft ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></div>
       <div><label>Status</label><select id="fs"><option value="">All</option>${STATUSES.map(s => `<option value="${s}" ${s === L.fs ? 'selected' : ''}>${cap(s)}</option>`).join('')}</select></div>
     </div>
@@ -225,7 +227,7 @@ async function viewAssets() {
   if ($('#add')) $('#add').onclick = () => go('#/form');
   const draw = async () => {
     let q = sb.from('assets').select('*', { count: 'exact' });
-    if (L.fp) q = q.eq('property_id', L.fp);
+    if (L.fp === '__none') q = q.is('property_id', null); else if (L.fp) q = q.eq('property_id', L.fp);
     if (L.ft) q = q.eq('item_type', L.ft);
     if (L.fs) q = q.eq('status', L.fs);
     const t = L.q.trim();
@@ -249,15 +251,44 @@ async function viewAssets() {
   draw();
 }
 
-/* ---------- Asset detail: view, status change, transfer ---------- */
+/* ---------- Asset detail: view, assign, status change, transfer ---------- */
 async function viewAsset(id) {
   const a = await getAsset(id);
   if (!a) { view.innerHTML = '<div class="card">Asset not found. It may have been deleted.</div>'; return; }
+  const assigned = !!a.property_id;
   const { data: mv } = await sb.from('movements').select('*').eq('asset_id', id).order('done_at', { ascending: false }).limit(30);
-  const where = (p, r, st) => propName(p) + ' / ' + (st ? 'Store' : (roomById(r) || {}).name || '-');
-  const hist = (mv || []).map(m => `<tr><td>${new Date(m.done_at).toLocaleString()}</td><td>${esc(m.done_by_name)}</td><td>${m.kind === 'transfer'
-    ? 'Moved: ' + esc(where(m.from_property, m.from_room, m.from_store)) + ' &rarr; ' + esc(where(m.to_property, m.to_room, m.to_store))
-    : 'Status: ' + esc(m.old_status) + ' &rarr; ' + esc(m.new_status)}${m.note ? '<br><span class="mute">' + esc(m.note) + '</span>' : ''}</td></tr>`).join('');
+  const where = (p, r, st) => !p ? 'Unassigned' : propName(p) + ' / ' + (st ? 'Store' : (roomById(r) || {}).name || '-');
+  const moveText = m => m.kind === 'transfer'
+    ? 'Moved: ' + where(m.from_property, m.from_room, m.from_store) + ' → ' + where(m.to_property, m.to_room, m.to_store)
+    : m.kind === 'assign' ? 'Assigned to ' + where(m.to_property, m.to_room, m.to_store) + ', status ' + m.new_status
+      : 'Status: ' + m.old_status + ' → ' + m.new_status;
+  const hist = (mv || []).map(m => `<tr><td>${new Date(m.done_at).toLocaleString()}</td><td>${esc(m.done_by_name)}</td><td>${esc(moveText(m))}${m.note ? '<br><span class="mute">' + esc(m.note) + '</span>' : ''}</td></tr>`).join('');
+
+  const auditCard = `<div class="card"><h2>Audit</h2>
+      <button class="btn sec" id="loc">Check my location</button>
+      <p id="locmsg" class="mute">Tap to compare where you are with where this asset is recorded.</p>
+      <h3>Change status</h3>
+      <div class="row"><div><label>New status</label><select id="ns">${STATUSES.map(s => `<option value="${s}" ${s === a.status ? 'selected' : ''}>${cap(s)}</option>`).join('')}</select></div>
+      <div><label>Note (optional)</label><input id="sn"></div></div>
+      <button class="btn" id="ss">Save status</button>
+      <h3>Transfer (physical location is different)</h3>
+      <div class="row"><div><label>To property</label><select id="tp">${S.props.map(p => `<option value="${p.id}" ${p.id === a.property_id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></div>
+      <div><label>To room / store</label><select id="tr"></select></div>
+      <div><label>Note (optional)</label><input id="tn"></div></div>
+      <button class="btn" id="tt">Transfer</button>
+    </div>`;
+  const assignCard = canEdit()
+    ? `<div class="card"><h2>Assign this asset</h2>
+      <p class="mute">This asset has been purchased but not placed yet. Choose where it goes and its condition, then print its QR label.</p>
+      <div class="row">
+        <div><label>Property *</label><select id="ap"><option value="">Choose property...</option>${S.props.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select></div>
+        <div><label>Room / area *</label><select id="ar"></select></div>
+        <div><label>Status *</label><select id="as"><option value="">Choose status...</option>${STATUSES.map(s => `<option value="${s}">${cap(s)}</option>`).join('')}</select></div>
+        <div><label>Note (optional)</label><input id="an"></div>
+      </div>
+      <button class="btn" id="asg">Assign and go to label</button></div>`
+    : '<div class="card"><h2>Not assigned yet</h2><p>This asset has not been placed in a property yet. The Projects team will assign it.</p></div>';
+
   view.innerHTML = `
     <div class="card">
       <h2>${tagOf(a)} - ${esc(a.item_type)} ${badge(a.status)}</h2>
@@ -271,22 +302,36 @@ async function viewAsset(id) {
         <tr><th>Vendor</th><td>${esc(a.vendor) || '-'}</td></tr>
         <tr><th>Warranty until</th><td>${esc(warrantyText(a))}</td></tr>
         <tr><th>Notes</th><td>${esc(a.notes) || '-'}</td></tr></table></div>
-      ${canEdit() ? `<button class="btn sec" id="edit">Edit</button><button class="btn sec" id="prt">Print QR</button>` : ''}
+      ${canEdit() ? `<button class="btn sec" id="edit">Edit</button>${assigned ? '<button class="btn sec" id="prt">Print QR</button>' : ''}` : ''}
     </div>
-    <div class="card"><h2>Audit</h2>
-      <button class="btn sec" id="loc">Check my location</button>
-      <p id="locmsg" class="mute">Tap to compare where you are with where this asset is recorded.</p>
-      <h3>Change status</h3>
-      <div class="row"><div><label>New status</label><select id="ns">${STATUSES.map(s => `<option value="${s}" ${s === a.status ? 'selected' : ''}>${cap(s)}</option>`).join('')}</select></div>
-      <div><label>Note (optional)</label><input id="sn"></div></div>
-      <button class="btn" id="ss">Save status</button>
-      <h3>Transfer (physical location is different)</h3>
-      <div class="row"><div><label>To property</label><select id="tp">${S.props.map(p => `<option value="${p.id}" ${p.id === a.property_id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></div>
-      <div><label>To room / store</label><select id="tr"></select></div>
-      <div><label>Note (optional)</label><input id="tn"></div></div>
-      <button class="btn" id="tt">Transfer</button>
-    </div>
+    ${assigned ? auditCard : assignCard}
     <div class="card"><h2>History</h2><div class="tw"><table>${hist || '<tr><td class="mute">No changes recorded yet.</td></tr>'}</table></div></div>`;
+
+  if ($('#edit')) $('#edit').onclick = () => go('#/form/' + a.id);
+  if ($('#prt')) $('#prt').onclick = () => go('#/print/' + a.id);
+
+  if (!assigned) {
+    if (!canEdit()) return;
+    const fillAr = () => {
+      const p = $('#ap').value;
+      $('#ar').innerHTML = p
+        ? '<option value="">Choose room...</option><option value="STORE">Store</option>' + S.rooms.filter(r => r.property_id === p).map(r => `<option value="${r.id}">${esc(r.name)}</option>`).join('')
+        : '<option value="">Choose a property first</option>';
+    };
+    $('#ap').onchange = fillAr; fillAr();
+    $('#asg').onclick = async () => {
+      try {
+        const p = $('#ap').value, r = $('#ar').value, st = $('#as').value;
+        if (!p || !r || !st) return fail(new Error('Choose a property, a room (or Store) and a status'));
+        $('#asg').disabled = true;
+        const toStore = r === 'STORE';
+        const { error } = await sb.rpc('assign_asset', { p_asset: a.id, p_property: p, p_room: toStore ? null : r, p_to_store: toStore, p_status: st, p_note: $('#an').value.trim() || null });
+        if (error) throw error;
+        toast('Assigned. The label is ready to print.'); go('#/print/' + a.id);
+      } catch (e) { $('#asg').disabled = false; fail(e); }
+    };
+    return;
+  }
 
   const fillDest = () => {
     const p = propById($('#tp').value);
@@ -296,8 +341,6 @@ async function viewAsset(id) {
     if (a.in_store && $('#tp').value === a.property_id) $('#tr').value = 'STORE';
   };
   $('#tp').onchange = fillDest; fillDest();
-
-  if ($('#edit')) { $('#edit').onclick = () => go('#/form/' + a.id); $('#prt').onclick = () => go('#/print/' + a.id); }
 
   $('#loc').onclick = async () => {
     $('#locmsg').textContent = 'Getting your location...';
@@ -335,25 +378,30 @@ async function viewAsset(id) {
   };
 }
 
-/* ---------- Add / edit asset (with "number of copies") ---------- */
+/* ---------- Add / edit asset (property, room and status are optional until assigned) ---------- */
 async function viewForm(id) {
   if (!canEdit()) { view.innerHTML = '<p>Page not available for your role.</p>'; return; }
   if (!S.types) await loadTypes();
   const a = id ? await getAsset(id) : null;
   if (id && !a) { view.innerHTML = '<div class="card">Asset not found.</div>'; return; }
-  const v = a || { status: 'working', property_id: S.props[0] && S.props[0].id };
+  const addMode = !a, unassignedEdit = !!a && !a.property_id;
+  const v = a || {};
+  const locFields = unassignedEdit
+    ? '<div><label>Location</label><p class="mute">Not assigned yet. Assign property, room and status from the asset page.</p></div>'
+    : `<div><label>Property ${addMode ? '(optional)' : '*'}</label><select id="pr">${addMode ? '<option value="">Not assigned (assign later)</option>' : ''}${S.props.map(p => `<option value="${p.id}" ${p.id === v.property_id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></div>
+      <div><label>Room / area ${addMode ? '(if property chosen)' : '*'}</label><select id="rm"></select></div>
+      <div><label>Status ${addMode ? '(if property chosen)' : '*'}</label><select id="st"></select></div>`;
   view.innerHTML = `<div class="card"><h2>${a ? 'Edit ' + tagOf(a) : 'Add asset'}</h2>
+    ${addMode ? '<p class="mute">Leave Property as "Not assigned" if the asset is only purchased. The Projects team assigns the property, room and status later, when they print its label.</p>' : ''}
     <div class="row">
       <div><label>Item type *</label><input id="it" list="tl" value="${esc(v.item_type)}" placeholder="e.g. Split AC, Chair, TV"><datalist id="tl">${S.types.map(t => `<option value="${esc(t)}">`).join('')}</datalist></div>
       <div><label>Description / model / serial</label><input id="ds" value="${esc(v.description)}"></div>
-      <div><label>Property *</label><select id="pr">${S.props.map(p => `<option value="${p.id}" ${p.id === v.property_id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></div>
-      <div><label>Room / area *</label><select id="rm"></select></div>
-      <div><label>Status</label><select id="st">${STATUSES.map(s => `<option value="${s}" ${s === v.status ? 'selected' : ''}>${cap(s)}</option>`).join('')}</select></div>
+      ${locFields}
       <div><label>Purchase date</label><input id="pd" type="date" value="${esc(v.purchase_date)}"></div>
       <div><label>Purchase cost (per item)</label><input id="pc" type="number" step="0.01" value="${esc(v.purchase_cost)}"></div>
       <div><label>Vendor name</label><input id="vn" value="${esc(v.vendor)}"></div>
       <div><label>Warranty valid until</label><input id="wu" type="date" value="${esc(v.warranty_until)}"></div>
-      ${a ? '' : '<div><label>Number of copies (each gets its own tag and QR)</label><input id="nc" type="number" min="1" max="500" value="1"></div>'}
+      ${addMode ? '<div><label>Number of copies (each gets its own tag and QR)</label><input id="nc" type="number" min="1" max="500" value="1"></div>' : ''}
     </div>
     <label>Notes</label><textarea id="nt">${esc(v.notes)}</textarea>
     <label>Photo (optional) ${v.photo_url ? '- a photo exists; choose a new one to replace it' : ''}</label>
@@ -361,13 +409,23 @@ async function viewForm(id) {
     ${v.photo_url ? `<p><img class="photo" src="${esc(v.photo_url)}"></p>` : ''}
     <button class="btn" id="save">Save</button><button class="btn sec" id="cancel">Cancel</button>
     ${a && can('procurement') ? '<button class="btn red" id="del">Delete</button>' : ''}</div>`;
-  const fillRooms = () => {
-    const rooms = S.rooms.filter(r => r.property_id === $('#pr').value);
-    $('#rm').innerHTML = '<option value="STORE">Store</option>' + rooms.map(r => `<option value="${r.id}">${esc(r.name)}</option>`).join('');
-    if (a && a.property_id === $('#pr').value) $('#rm').value = a.in_store ? 'STORE' : (a.room_id || 'STORE');
-    else if (rooms.length) $('#rm').value = rooms[0].id;
+
+  const statusOpts = (placeholder, sel) => `<option value="">${placeholder}</option>` + STATUSES.map(s => `<option value="${s}" ${s === sel ? 'selected' : ''}>${cap(s)}</option>`).join('');
+  const syncLoc = first => {
+    if (unassignedEdit) return;
+    const p = $('#pr').value;
+    if (!p) {
+      $('#rm').innerHTML = '<option value="">-</option>'; $('#rm').disabled = true;
+      $('#st').innerHTML = statusOpts('Not set (set when assigned)', ''); $('#st').disabled = true;
+      return;
+    }
+    const keepStatus = $('#st').value || (first && a ? a.status : '');
+    $('#rm').disabled = false; $('#st').disabled = false;
+    $('#rm').innerHTML = '<option value="">Choose room...</option><option value="STORE">Store</option>' + S.rooms.filter(r => r.property_id === p).map(r => `<option value="${r.id}">${esc(r.name)}</option>`).join('');
+    $('#st').innerHTML = statusOpts('Choose status...', keepStatus);
+    if (a && a.property_id === p) $('#rm').value = a.in_store ? 'STORE' : (a.room_id || '');
   };
-  $('#pr').onchange = fillRooms; fillRooms();
+  if (!unassignedEdit) { $('#pr').onchange = () => syncLoc(false); syncLoc(true); }
   $('#cancel').onclick = () => history.back();
   if ($('#del')) $('#del').onclick = async () => {
     if (!confirm('Delete this asset and its history?')) return;
@@ -376,9 +434,19 @@ async function viewForm(id) {
   };
   $('#save').onclick = async () => {
     try {
-      if (!$('#it').value.trim() || !$('#pr').value) return fail(new Error('Item type and property are required'));
+      if (!$('#it').value.trim()) return fail(new Error('Item type is required'));
       const copies = a ? 1 : Math.floor(Number($('#nc').value));
       if (!a && !(copies >= 1 && copies <= 500)) return fail(new Error('Number of copies must be between 1 and 500'));
+      let loc = {};
+      if (!unassignedEdit) {
+        const p = $('#pr').value;
+        if (!p) loc = { property_id: null, room_id: null, in_store: false, status: null };
+        else {
+          const r = $('#rm').value, st = $('#st').value;
+          if (!r || !st) return fail(new Error('Choose a room (or Store) and a status, or set Property to "Not assigned"'));
+          loc = { property_id: p, room_id: r === 'STORE' ? null : r, in_store: r === 'STORE', status: st };
+        }
+      }
       $('#save').disabled = true;
       let photo_url = v.photo_url || null;
       const f = $('#ph').files[0];
@@ -388,10 +456,8 @@ async function viewForm(id) {
         if (up.error) throw up.error;
         photo_url = sb.storage.from('asset-photos').getPublicUrl(path).data.publicUrl;
       }
-      const toStore = $('#rm').value === 'STORE';
       const row = {
-        item_type: $('#it').value.trim(), description: $('#ds').value.trim() || null, property_id: $('#pr').value,
-        room_id: toStore ? null : $('#rm').value, in_store: toStore, status: $('#st').value,
+        item_type: $('#it').value.trim(), description: $('#ds').value.trim() || null, ...loc,
         purchase_date: $('#pd').value || null, purchase_cost: $('#pc').value === '' ? null : Number($('#pc').value),
         vendor: $('#vn').value.trim() || null, warranty_until: $('#wu').value || null, notes: $('#nt').value.trim() || null,
         photo_url, updated_at: new Date().toISOString()
@@ -404,7 +470,8 @@ async function viewForm(id) {
         const { data, error } = await sb.from('assets').insert(Array.from({ length: copies }, () => row)).select('id');
         if (error) throw error;
         if (copies === 1) { toast('Saved'); go('#/asset/' + data[0].id); }
-        else { S.printPre = { ids: data.map(x => x.id) }; toast(copies + ' assets created. Labels are ready to print.'); go('#/print'); }
+        else if (loc.property_id) { S.printPre = { ids: data.map(x => x.id) }; toast(copies + ' assets created. Labels are ready to print.'); go('#/print'); }
+        else { L.fp = '__none'; L.q = ''; L.ft = ''; L.fs = ''; L.page = 0; toast(copies + ' unassigned assets created. Assign each one before printing its label.'); go('#/assets'); }
       }
     } catch (e) { $('#save').disabled = false; fail(e); }
   };
@@ -421,6 +488,7 @@ async function viewPrint(preId) {
   const st = { ids: preId ? [preId] : (pre && pre.ids) || null, page: 0 };
   view.innerHTML = `<div class="card noprint"><h2>Print QR labels</h2>
     <p id="bn" class="mute"></p>
+    <p id="un" class="mute"></p>
     <div class="row">
       <div><label>1. Property</label><select id="pp">${S.props.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select></div>
       <div><label>2. Room / area</label><select id="pr"></select></div>
@@ -458,15 +526,17 @@ async function viewPrint(preId) {
       if (r.error) return fail(r.error); rows = r.data; total = r.count;
     }
     box.innerHTML = '';
-    if (!rows.length) { box.innerHTML = '<p class="mute">No assets match.</p>'; $('#pg').textContent = ''; return; }
+    const got = rows.length, skipped = rows.filter(a => !a.property_id).length;
+    rows = rows.filter(a => a.property_id); // an asset needs a property and room before its label prints
+    if (!rows.length) { box.innerHTML = '<p class="mute">No assets with a property and room match.</p>'; $('#pg').textContent = skipped ? skipped + ' unassigned asset(s) skipped. Assign them first.' : ''; return; }
     rows.forEach(a => {
       const d = document.createElement('div'); d.className = 'label';
       d.innerHTML = '<span class="ttl">' + esc(LABEL_TITLE) + '</span><div class="qr"></div><b>' + tagOf(a) + '</b><span>' + esc(a.item_type) + '</span><span>' + esc(propName(a.property_id)) + ' / ' + esc(roomLabel(a)) + '</span>';
       box.appendChild(d);
       new QRCode(d.querySelector('.qr'), { text: qrLink(a.id), width: 110, height: 110, correctLevel: QRCode.CorrectLevel.M });
     });
-    $('#pg').textContent = `Labels ${from + 1}-${from + rows.length} of ${total}`;
-    $('#lprev').disabled = st.page === 0; $('#lnext').disabled = from + rows.length >= total;
+    $('#pg').textContent = `Labels ${from + 1}-${from + got} of ${total}` + (skipped ? ` (${skipped} unassigned skipped - assign them first)` : '');
+    $('#lprev').disabled = st.page === 0; $('#lnext').disabled = from + got >= total;
   };
   $('#pp').onchange = () => { leaveIds(); fillRooms(); fillAssets(); };
   $('#pr').onchange = () => { leaveIds(); fillAssets(); };
@@ -476,6 +546,9 @@ async function viewPrint(preId) {
   $('#prt').onclick = async () => { if (!$('#labels').querySelector('.label')) await showLabels(); setTimeout(() => window.print(), 300); };
   $('#lprev').disabled = true; $('#lnext').disabled = true;
 
+  sb.from('assets').select('id', { count: 'exact', head: true }).is('property_id', null).then(({ count }) => {
+    if (count && $('#un')) { $('#un').innerHTML = `<b>${count}</b> asset(s) are waiting to be assigned and cannot print yet. <button class="btn sec" id="seeun" style="margin:0">Show them</button>`; $('#seeun').onclick = () => { L.fp = '__none'; L.q = ''; L.ft = ''; L.fs = ''; L.page = 0; go('#/assets'); }; }
+  });
   if (S.props.length) { fillRooms(); await fillAssets(); }
   if (st.ids) {
     $('#bn').textContent = st.ids.length === 1 ? 'Showing the label for the selected asset. Change the dropdowns and press Show labels to print others.' : `Showing labels for the ${st.ids.length} assets you just created or imported. Change the dropdowns and press Show labels to print others.`;
@@ -511,10 +584,10 @@ function viewScan() {
 /* ---------- Import from Excel / CSV ---------- */
 const IMPORT_COLS = [
   ['item_type', 'Yes', 'What the item is', 'Chair, Split AC, Ceiling Fan'],
-  ['property', 'Yes', 'Property name, spelled exactly as in the Properties tab', 'Property A'],
-  ['room', 'Yes', 'Room / area name exactly as in the app, or the word STORE for the property store', '101, Lobby, STORE'],
   ['description', 'No', 'Make / model / serial', 'Voltas 1.5 ton'],
-  ['status', 'No', 'working, repairable or damaged (blank = working)', 'working'],
+  ['property', 'If placed', 'Property name, spelled exactly as in the Properties tab. Empty = not assigned yet', 'Property A'],
+  ['room', 'If placed', 'Room / area name exactly as in the app, or the word STORE for the property store. Empty = not assigned yet', '101, Lobby, STORE'],
+  ['status', 'If placed', 'working, repairable or damaged. Empty = not assigned yet', 'working'],
   ['purchase_date', 'No', 'YYYY-MM-DD (DD/MM/YYYY also works)', '2025-04-15'],
   ['purchase_cost', 'No', 'Cost of ONE item, numbers only', '2500'],
   ['vendor', 'No', 'Vendor name', 'ABC Furniture'],
@@ -522,7 +595,7 @@ const IMPORT_COLS = [
   ['notes', 'No', 'Any note', ''],
   ['quantity', 'No', 'How many identical items this row creates; each gets its own tag and QR (blank = 1, max 1000)', '10']
 ];
-const IMPORT_REQUIRED = ['item_type', 'property', 'room'];
+const IMPORT_REQUIRED = ['item_type', 'property', 'room', 'status']; // these headers must exist in row 1
 const normKey = k => String(k).trim().toLowerCase().replace(/[\s-]+/g, '_');
 const isBlank = v => v === '' || v == null;
 
@@ -569,20 +642,25 @@ function validateRows(rawRows, autoRooms) {
     if (Object.values(r).every(isBlank)) return;
     const line = i + 2, bad = [];
     const item = String(r.item_type ?? '').trim(); if (!item) bad.push('item_type is empty');
-    const prop = propMap.get(String(r.property ?? '').trim().toLowerCase());
-    if (!prop) bad.push(`property "${String(r.property ?? '').trim()}" does not exist`);
-    const roomTxt = String(r.room ?? '').trim();
-    let inStore = false, roomId = null, roomName = null;
-    if (!roomTxt) bad.push('room is empty (use a room name or STORE)');
-    else if (roomTxt.toUpperCase() === 'STORE') inStore = true;
-    else if (prop) {
-      const rm = roomMap.get(prop.id + '|' + roomTxt.toLowerCase());
-      if (rm) roomId = rm.id;
-      else if (autoRooms) { roomName = roomTxt; newRooms.set(prop.id + '|' + roomTxt.toLowerCase(), { property_id: prop.id, name: roomTxt }); }
-      else bad.push(`room "${roomTxt}" does not exist in ${prop.name}`);
+    const propTxt = String(r.property ?? '').trim(), roomTxt = String(r.room ?? '').trim(), statusTxt = String(r.status ?? '').trim().toLowerCase();
+    let prop = null, inStore = false, roomId = null, roomName = null, status = null;
+    if (!propTxt) {
+      if (roomTxt || statusTxt) bad.push('property is empty but room or status is filled (leave all three empty for an unassigned asset)');
+    } else {
+      prop = propMap.get(propTxt.toLowerCase());
+      if (!prop) bad.push(`property "${propTxt}" does not exist`);
+      if (!roomTxt) bad.push('room is empty (use a room name or STORE)');
+      else if (roomTxt.toUpperCase() === 'STORE') inStore = true;
+      else if (prop) {
+        const rm = roomMap.get(prop.id + '|' + roomTxt.toLowerCase());
+        if (rm) roomId = rm.id;
+        else if (autoRooms) { roomName = roomTxt; newRooms.set(prop.id + '|' + roomTxt.toLowerCase(), { property_id: prop.id, name: roomTxt }); }
+        else bad.push(`room "${roomTxt}" does not exist in ${prop.name}`);
+      }
+      if (!statusTxt) bad.push('status is required when a property is given (working, repairable or damaged)');
+      else if (!STATUSES.includes(statusTxt)) bad.push(`status "${statusTxt}" must be working, repairable or damaged`);
+      else status = statusTxt;
     }
-    let status = String(r.status ?? '').trim().toLowerCase();
-    if (!status) status = 'working'; else if (!STATUSES.includes(status)) bad.push(`status "${status}" must be working, repairable or damaged`);
     const pd = parseDate(r.purchase_date); if (!pd.ok) bad.push('purchase_date is not a valid date');
     const wu = parseDate(r.warranty_until); if (!wu.ok) bad.push('warranty_until is not a valid date');
     const pc = parseCost(r.purchase_cost); if (!pc.ok) bad.push('purchase_cost must be a number');
@@ -593,7 +671,7 @@ function validateRows(rawRows, autoRooms) {
     rows.push({
       qty, roomKey: roomName ? prop.id + '|' + roomName.toLowerCase() : null,
       data: {
-        item_type: item, description: String(r.description ?? '').trim() || null, property_id: prop.id, room_id: roomId, in_store: inStore,
+        item_type: item, description: String(r.description ?? '').trim() || null, property_id: prop ? prop.id : null, room_id: roomId, in_store: inStore,
         status, purchase_date: pd.val, purchase_cost: pc.val, vendor: String(r.vendor ?? '').trim() || null,
         warranty_until: wu.val, notes: String(r.notes ?? '').trim() || null
       }
@@ -606,14 +684,16 @@ function validateRows(rawRows, autoRooms) {
 function templateCsv() {
   return IMPORT_COLS.map(c => c[0]).join(',') + '\n' +
     'Chair,Wooden dining chair,Property A,Lobby,working,2025-04-15,2500,ABC Furniture,2027-04-14,,10\n' +
-    'Split AC,Voltas 1.5 ton,Property A,STORE,working,2024-06-01,38000,XYZ Traders,2029-05-31,Spare unit,1\n';
+    'Split AC,Voltas 1.5 ton,Property A,STORE,working,2024-06-01,38000,XYZ Traders,2029-05-31,Spare unit,1\n' +
+    'Ceiling Fan,Purchased - not placed yet,,,,2025-09-10,3200,Fan Mart,2027-09-09,,20\n';
 }
 
 function viewImport() {
   if (!canEdit()) { view.innerHTML = '<p>Page not available for your role.</p>'; return; }
   view.innerHTML = `<div class="card"><h2>Import assets from Excel or CSV</h2>
     <p>Use an .xlsx or .csv file. <b>Row 1 must be the headers below, spelled exactly like this</b> (small letters, underscores, no spaces). The first sheet is read. One row = one item, or several identical items if you use <b>quantity</b>.</p>
-    <div class="tw"><table><tr><th>Header</th><th>Required</th><th>What to enter</th><th>Example</th></tr>
+    <p><b>Placed or not placed:</b> the columns <b>property, room and status must exist</b> in row 1. For an asset that is only purchased, leave all three cells empty; the Projects team assigns it later. If <b>property</b> is filled, then <b>room</b> and <b>status</b> must be filled too.</p>
+    <div class="tw"><table><tr><th>Header</th><th>Required?</th><th>What to enter</th><th>Example</th></tr>
     ${IMPORT_COLS.map(c => `<tr><td><b>${c[0]}</b></td><td>${c[1]}</td><td>${esc(c[2])}</td><td>${esc(c[3])}</td></tr>`).join('')}</table></div>
     <p class="mute">Properties must already exist (Properties tab). ${can('procurement') ? 'Missing rooms can be created automatically (tick the box below).' : 'Rooms must already exist; ask Procurement to add new ones.'} The whole file is checked first; nothing is saved if any row has a mistake. Dates typed as text should be YYYY-MM-DD.</p>
     <button class="btn sec" id="tpl">Download template (CSV)</button>
@@ -636,7 +716,7 @@ function viewImport() {
       const errHtml = res.errors.length ? `<p class="err"><b>${res.errors.length} problem(s) found. Fix the file and choose it again.</b></p><div class="tw"><table>${res.errors.slice(0, 50).map(e => `<tr><td class="err">${esc(e)}</td></tr>`).join('')}</table></div>${res.errors.length > 50 ? '<p class="mute">Showing first 50.</p>' : ''}` : '';
       const okHtml = !res.errors.length ? `<p><b>File is OK.</b> ${res.rows.length} row(s) will create <b>${res.units}</b> asset(s).${res.newRooms.size ? ' ' + res.newRooms.size + ' new room(s) will be created.' : ''}</p>
         <div class="tw"><table><tr><th>Item</th><th>Property</th><th>Room</th><th>Status</th><th>Date</th><th>Cost</th><th>Warranty</th><th>Qty</th></tr>
-        ${res.rows.slice(0, 5).map(x => `<tr><td>${esc(x.data.item_type)}</td><td>${esc(propName(x.data.property_id))}</td><td>${x.data.in_store ? 'STORE' : esc(x.roomKey ? x.roomKey.split('|')[1] : (roomById(x.data.room_id) || {}).name)}</td><td>${x.data.status}</td><td>${esc(x.data.purchase_date) || '-'}</td><td>${money(x.data.purchase_cost)}</td><td>${esc(x.data.warranty_until) || '-'}</td><td>${x.qty}</td></tr>`).join('')}</table></div>
+        ${res.rows.slice(0, 5).map(x => `<tr><td>${esc(x.data.item_type)}</td><td>${esc(propName(x.data.property_id))}</td><td>${x.data.in_store ? 'STORE' : esc(x.roomKey ? x.roomKey.split('|')[1] : (roomById(x.data.room_id) || {}).name) || '-'}</td><td>${x.data.status || '-'}</td><td>${esc(x.data.purchase_date) || '-'}</td><td>${money(x.data.purchase_cost)}</td><td>${esc(x.data.warranty_until) || '-'}</td><td>${x.qty}</td></tr>`).join('')}</table></div>
         <p class="mute">Check the first rows above (especially the dates), then import.</p><button class="btn" id="go">Import ${res.units} asset(s)</button>` : '';
       $('#out').innerHTML = errHtml + okHtml;
       if ($('#go')) $('#go').onclick = () => runImport(current);
