@@ -7,8 +7,10 @@ const $ = (s, el = document) => el.querySelector(s);
 const S = { profile: null, props: [], rooms: [], types: null, printPre: null };
 let sb = null;
 const LABEL_TITLE = (CFG && CFG.LABEL_TITLE) || 'CLSPL Asset';
+document.documentElement.style.setProperty('--lbl', ((window.APP_CONFIG && Number(window.APP_CONFIG.LABEL_MM)) || 50) + 'mm');
 const PAGE = 50;        // rows per page in the asset list
-const LABELS_PER = 100; // labels per print page
+const LABEL_MM = (window.APP_CONFIG && Number(window.APP_CONFIG.LABEL_MM)) || 50; // label size in mm
+const LABELS_PER = 90;  // labels per print batch (6 A4 sheets of 15)
 const CHUNK = 500;      // rows per request when creating many assets
 
 const TABS = {
@@ -209,10 +211,35 @@ async function viewSummary() {
     <div class="card"><h2>Property x Item (count)</h2><div class="tw"><table><tr><th>Property</th>${types.map(t => `<th class="num">${esc(t)}</th>`).join('')}<th class="num">Total</th></tr>${matrix}${matrixU}</table></div></div>`;
 }
 
-/* ---------- Asset list (paged, filtered in the database) ---------- */
+/* ---------- Asset list (paged, filtered in the database) + bulk assign ---------- */
 const L = { page: 0, q: '', fp: '', ft: '', fs: '' };
+const SEL = new Set();   // ticked unassigned assets (bulk assign)
+const BULK_CHUNK = 2000; // assets per request when bulk assigning
+const searchText = () => { const t = L.q.trim(); return /^(?:ast-?)?0*\d+$/i.test(t) ? '' : t.replace(/[,()%*]/g, ' ').trim(); };
+function applyFilters(q) {
+  if (L.fp === '__none') q = q.is('property_id', null); else if (L.fp) q = q.eq('property_id', L.fp);
+  if (L.ft) q = q.eq('item_type', L.ft);
+  if (L.fs) q = q.eq('status', L.fs);
+  const t = L.q.trim();
+  if (t) {
+    const n = t.match(/^(?:ast-?)?0*(\d+)$/i);
+    if (n) q = q.eq('tag_no', Number(n[1]));
+    else { const w = searchText(); if (w) q = q.or(`item_type.ilike.%${w}%,description.ilike.%${w}%,vendor.ilike.%${w}%`); }
+  }
+  return q;
+}
+/* counts the unassigned assets that bulk assign would use: Unassigned + Item filter + text search */
+function bulkQuery() {
+  let q = sb.from('assets').select('id', { count: 'exact', head: true }).is('property_id', null);
+  if (L.ft) q = q.eq('item_type', L.ft);
+  const w = searchText(); if (w) q = q.or(`item_type.ilike.%${w}%,description.ilike.%${w}%,vendor.ilike.%${w}%`);
+  return q;
+}
+const naturalRooms = pid => S.rooms.filter(r => r.property_id === pid).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+
 async function viewAssets() {
   if (!S.types) await loadTypes();
+  const bulkOn = () => L.fp === '__none' && canEdit();
   view.innerHTML = `<div class="card">
     <h2>Assets ${canEdit() ? '<button class="btn" id="add" style="float:right;margin:0">+ Add asset</button>' : ''}</h2>
     <div class="row">
@@ -220,34 +247,158 @@ async function viewAssets() {
       <div><label>Property</label><select id="fp"><option value="">All</option><option value="__none" ${L.fp === '__none' ? 'selected' : ''}>Unassigned (not placed yet)</option>${S.props.map(p => `<option value="${p.id}" ${p.id === L.fp ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></div>
       <div><label>Item</label><select id="ft"><option value="">All</option>${S.types.map(t => `<option ${t === L.ft ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></div>
       <div><label>Status</label><select id="fs"><option value="">All</option>${STATUSES.map(s => `<option value="${s}" ${s === L.fs ? 'selected' : ''}>${cap(s)}</option>`).join('')}</select></div>
-    </div>
+    </div></div>
+    <div id="bulkbox"></div>
+    <div class="card">
     <p class="mute" id="count"></p>
-    <div class="tw"><table><thead><tr><th>Tag</th><th>Item</th><th>Description</th><th>Property</th><th>Room</th><th>Status</th><th>Warranty</th></tr></thead><tbody id="rows"></tbody></table></div>
+    <div class="tw"><table><thead id="thead"></thead><tbody id="rows"></tbody></table></div>
     <button class="btn sec" id="prev">Previous</button><button class="btn sec" id="next">Next</button></div>`;
   if ($('#add')) $('#add').onclick = () => go('#/form');
+
   const draw = async () => {
-    let q = sb.from('assets').select('*', { count: 'exact' });
-    if (L.fp === '__none') q = q.is('property_id', null); else if (L.fp) q = q.eq('property_id', L.fp);
-    if (L.ft) q = q.eq('item_type', L.ft);
-    if (L.fs) q = q.eq('status', L.fs);
-    const t = L.q.trim();
-    if (t) {
-      const n = t.match(/^(?:ast-?)?0*(\d+)$/i);
-      if (n) q = q.eq('tag_no', Number(n[1]));
-      else { const w = t.replace(/[,()%*]/g, ' ').trim(); if (w) q = q.or(`item_type.ilike.%${w}%,description.ilike.%${w}%,vendor.ilike.%${w}%`); }
-    }
+    const sel = bulkOn();
     const from = L.page * PAGE;
-    const { data, count, error } = await q.order('tag_no').range(from, from + PAGE - 1);
+    const { data, count, error } = await applyFilters(sb.from('assets').select('*', { count: 'exact' })).order('tag_no').range(from, from + PAGE - 1);
     if (error) return fail(error);
+    $('#thead').innerHTML = `<tr>${sel ? '<th><input type="checkbox" id="selall" title="Tick all on this page"></th>' : ''}<th>Tag</th><th>Item</th><th>Description</th><th>Property</th><th>Room</th><th>Status</th><th>Warranty</th></tr>`;
     $('#count').textContent = count === 0 ? 'No assets match.' : `Showing ${from + 1}-${from + data.length} of ${count}`;
-    $('#rows').innerHTML = data.map(a => `<tr class="click" data-id="${a.id}"><td>${tagOf(a)}</td><td>${esc(a.item_type)}</td><td>${esc(a.description)}</td><td>${esc(propName(a.property_id))}</td><td>${esc(roomLabel(a))}</td><td>${badge(a.status)}</td><td>${esc(warrantyText(a))}</td></tr>`).join('');
+    $('#rows').innerHTML = data.map(a => `<tr class="click" data-id="${a.id}">${sel ? `<td><input type="checkbox" class="sel" data-id="${a.id}" ${SEL.has(a.id) ? 'checked' : ''}></td>` : ''}<td>${tagOf(a)}</td><td>${esc(a.item_type)}</td><td>${esc(a.description)}</td><td>${esc(propName(a.property_id))}</td><td>${esc(roomLabel(a))}</td><td>${badge(a.status)}</td><td>${esc(warrantyText(a))}</td></tr>`).join('');
     $('#prev').disabled = L.page === 0; $('#next').disabled = from + data.length >= count;
+    if ($('#selall')) $('#selall').onchange = () => {
+      document.querySelectorAll('#rows input.sel').forEach(c => { c.checked = $('#selall').checked; if (c.checked) SEL.add(c.dataset.id); else SEL.delete(c.dataset.id); });
+      updateSelNote();
+    };
   };
+
+  /* ----- bulk assign panel (only while the Unassigned filter is on) ----- */
+  const updateSelNote = () => {
+    if (!$('#bsel')) return;
+    $('#bsel').textContent = SEL.size ? `${SEL.size} row(s) are ticked in the list below. Only those will be assigned (the "How many" box is ignored).` : 'Nothing ticked: the first N matching assets (lowest tag numbers) are assigned. You can also tick rows in the list below.';
+  };
+  const updateBulkInfo = async () => {
+    if (!$('#bm')) return;
+    const { count, error } = await bulkQuery(); if (error) return;
+    $('#bm').textContent = `${count} unassigned asset(s) match the Item and Search filters.` + (L.ft ? '' : ' Tip: choose an Item above (for example Chair) so only that item is assigned.');
+  };
+  const fillBulkPlaces = () => {
+    const p = $('#bp').value;
+    $('#br').innerHTML = p ? '<option value="">Choose room...</option><option value="STORE">Store</option>' + naturalRooms(p).map(r => `<option value="${r.id}">${esc(r.name)}</option>`).join('') : '<option value="">Choose a property first</option>';
+    $('#brooms').innerHTML = p
+      ? naturalRooms(p).map(r => `<label class="chk"><input type="checkbox" class="rm" value="${r.id}" checked> ${esc(r.name)}</label>`).join('') + '<label class="chk"><input type="checkbox" id="bstore"> Store</label>'
+      : '<span class="mute">Choose a property first</span>';
+  };
+  const renderBulk = () => {
+    const box = $('#bulkbox');
+    if (!bulkOn()) { box.innerHTML = ''; return; }
+    box.innerHTML = `<div class="card"><h2>Bulk assign</h2>
+      <p id="bm" class="mute"></p>
+      <label class="chk"><input type="radio" name="bmode" value="one" checked> Put them all in one place</label>
+      <label class="chk"><input type="radio" name="bmode" value="spread"> Spread across rooms: the same number in each room that stays ticked</label>
+      <div class="row">
+        <div><label>Property *</label><select id="bp"><option value="">Choose property...</option>${S.props.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select></div>
+        <div><label>Status *</label><select id="bs"><option value="">Choose status...</option>${STATUSES.map(s => `<option value="${s}">${cap(s)}</option>`).join('')}</select></div>
+        <div><label>Note (optional)</label><input id="bnote"></div>
+      </div>
+      <div id="bone"><div class="row">
+        <div><label>Room / area *</label><select id="br"><option value="">Choose a property first</option></select></div>
+        <div><label>How many (blank = all matching)</label><input id="bq" type="number" min="1" placeholder="e.g. 100"></div></div>
+        <p id="bsel" class="mute"></p></div>
+      <div id="bspread" style="display:none">
+        <div class="row"><div><label>Items per room *</label><input id="bk" type="number" min="1" value="2"></div></div>
+        <label>Rooms that get items (untick the rooms to leave out; Store is only used if you tick it)</label>
+        <p><a href="#" id="rall">Tick all rooms</a> &nbsp; <a href="#" id="rnone">Untick all</a></p>
+        <div id="brooms" class="roomlist"><span class="mute">Choose a property first</span></div>
+        <p class="mute">The Item filter above must be set (for example Chair). If there are not enough assets for every ticked room, nothing is assigned.</p>
+      </div>
+      <button class="btn" id="bgo">Assign</button>
+      <div id="bres" style="margin-top:10px"></div></div>`;
+    document.querySelectorAll('input[name=bmode]').forEach(r => { r.onchange = () => { const sp = document.querySelector('input[name=bmode]:checked').value === 'spread'; $('#bone').style.display = sp ? 'none' : ''; $('#bspread').style.display = sp ? '' : 'none'; }; });
+    $('#bp').onchange = fillBulkPlaces;
+    $('#rall').onclick = e => { e.preventDefault(); document.querySelectorAll('#brooms input.rm').forEach(c => { c.checked = true; }); };
+    $('#rnone').onclick = e => { e.preventDefault(); document.querySelectorAll('#brooms input').forEach(c => { c.checked = false; }); };
+    $('#bgo').onclick = runBulk;
+    updateSelNote(); updateBulkInfo();
+  };
+
+  const runBulk = async () => {
+    const mode = document.querySelector('input[name=bmode]:checked').value;
+    const prop = $('#bp').value, st = $('#bs').value, note = $('#bnote').value.trim() || null;
+    if (!prop || !st) return fail(new Error('Choose a property and a status'));
+    const search = searchText() || null, item = L.ft || null, btn = $('#bgo');
+    let ids = [];
+    try {
+      if (mode === 'one') {
+        const r = $('#br').value; if (!r) return fail(new Error('Choose a room (or Store)'));
+        const toStore = r === 'STORE', room = toStore ? null : r;
+        const where = propName(prop) + ' / ' + (toStore ? 'Store' : roomById(room).name);
+        if (SEL.size) {
+          const picked = [...SEL];
+          if (!confirm(`Assign the ${picked.length} ticked asset(s) to ${where} as ${st}?`)) return;
+          btn.disabled = true;
+          for (let i = 0; i < picked.length; i += BULK_CHUNK) {
+            btn.textContent = `Assigning ${i} of ${picked.length}...`;
+            const { data, error } = await sb.rpc('assign_bulk', { p_ids: picked.slice(i, i + BULK_CHUNK), p_item_type: null, p_search: null, p_qty: null, p_property: prop, p_room: room, p_to_store: toStore, p_status: st, p_note: note });
+            if (error) throw error;
+            ids = ids.concat(data || []);
+          }
+        } else {
+          const { count, error: ce } = await bulkQuery(); if (ce) throw ce;
+          const want = $('#bq').value ? Math.floor(Number($('#bq').value)) : count;
+          const qty = Math.min(want, count);
+          if (!(qty >= 1)) return fail(new Error('No unassigned assets match, or the quantity is not valid'));
+          if (!confirm(`Assign ${qty} ${item || 'unassigned asset(s)'} (of ${count} matching) to ${where} as ${st}?`)) return;
+          btn.disabled = true;
+          let left = qty;
+          while (left > 0) {
+            const n = Math.min(left, BULK_CHUNK);
+            btn.textContent = `Assigning ${ids.length} of ${qty}...`;
+            const { data, error } = await sb.rpc('assign_bulk', { p_ids: null, p_item_type: item, p_search: search, p_qty: n, p_property: prop, p_room: room, p_to_store: toStore, p_status: st, p_note: note });
+            if (error) throw error;
+            const got = (data || []).length; ids = ids.concat(data || []); left -= got;
+            if (got < n) break;
+          }
+        }
+      } else {
+        const per = Math.floor(Number($('#bk').value));
+        const rooms = [...document.querySelectorAll('#brooms input.rm:checked')].map(c => c.value);
+        const incStore = !!($('#bstore') && $('#bstore').checked);
+        if (!item) return fail(new Error('Choose an Item in the filters above (for example Chair) so only that item is spread'));
+        if (!(per >= 1)) return fail(new Error('Items per room must be 1 or more'));
+        if (!rooms.length && !incStore) return fail(new Error('Tick at least one room'));
+        const places = rooms.length + (incStore ? 1 : 0), need = per * places;
+        const { count, error: ce } = await bulkQuery(); if (ce) throw ce;
+        if (count < need) return fail(new Error(`Only ${count} unassigned ${item} are available, but ${need} are needed (${per} per place x ${places} places).`));
+        const left = naturalRooms(prop).filter(r => !rooms.includes(r.id)).map(r => r.name);
+        if (!confirm(`Assign ${per} ${item} to each of ${places} place(s) in ${propName(prop)}: ${need} in total, as ${st}.\n${left.length ? 'Rooms left out: ' + left.join(', ') + '.\n' : ''}${count - need} ${item} will stay unassigned.\n\nContinue?`)) return;
+        btn.disabled = true; btn.textContent = 'Assigning...';
+        const { data, error } = await sb.rpc('assign_spread', { p_item_type: item, p_search: search, p_per_room: per, p_property: prop, p_rooms: rooms, p_include_store: incStore, p_status: st, p_note: note });
+        if (error) throw error;
+        ids = data || [];
+      }
+      SEL.clear();
+      btn.disabled = false; btn.textContent = 'Assign';
+      $('#bres').innerHTML = `<p><b>${ids.length} asset(s) assigned.</b></p><button class="btn" id="bpr">Print labels for these</button>`;
+      $('#bpr').onclick = () => { S.printPre = { ids }; go('#/print'); };
+      updateSelNote(); updateBulkInfo(); draw();
+    } catch (e) {
+      btn.disabled = false; btn.textContent = 'Assign';
+      fail(ids.length ? new Error(`Stopped after ${ids.length} asset(s) were assigned: ${e.message || e}. Check the list before running again.`) : e);
+      if (ids.length) { updateBulkInfo(); draw(); }
+    }
+  };
+
   let timer;
-  $('#q').oninput = () => { clearTimeout(timer); timer = setTimeout(() => { L.q = $('#q').value; L.page = 0; draw(); }, 350); };
-  ['fp', 'ft', 'fs'].forEach(i => $('#' + i).onchange = () => { L[i] = $('#' + i).value; L.page = 0; draw(); });
+  const changed = () => { SEL.clear(); L.page = 0; updateSelNote(); draw(); updateBulkInfo(); };
+  $('#q').oninput = () => { clearTimeout(timer); timer = setTimeout(() => { L.q = $('#q').value; changed(); }, 350); };
+  $('#fp').onchange = () => { L.fp = $('#fp').value; SEL.clear(); L.page = 0; renderBulk(); draw(); };
+  ['ft', 'fs'].forEach(i => { $('#' + i).onchange = () => { L[i] = $('#' + i).value; changed(); }; });
   $('#prev').onclick = () => { L.page--; draw(); }; $('#next').onclick = () => { L.page++; draw(); };
-  $('#rows').onclick = e => { const tr = e.target.closest('tr[data-id]'); if (tr) go('#/asset/' + tr.dataset.id); };
+  $('#rows').onclick = e => {
+    const cb = e.target.closest('input.sel');
+    if (cb) { if (cb.checked) SEL.add(cb.dataset.id); else SEL.delete(cb.dataset.id); updateSelNote(); return; }
+    const tr = e.target.closest('tr[data-id]'); if (tr) go('#/asset/' + tr.dataset.id);
+  };
+  renderBulk();
   draw();
 }
 
@@ -279,14 +430,14 @@ async function viewAsset(id) {
     </div>`;
   const assignCard = canEdit()
     ? `<div class="card"><h2>Assign this asset</h2>
-      <p class="mute">This asset has been purchased but not placed yet. Choose where it goes and its condition, then print its QR label.</p>
+      <p class="mute">This asset has been purchased but not placed yet. Choose where it goes and its condition, then assign. You can print its QR label now or later.</p>
       <div class="row">
         <div><label>Property *</label><select id="ap"><option value="">Choose property...</option>${S.props.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select></div>
         <div><label>Room / area *</label><select id="ar"></select></div>
         <div><label>Status *</label><select id="as"><option value="">Choose status...</option>${STATUSES.map(s => `<option value="${s}">${cap(s)}</option>`).join('')}</select></div>
         <div><label>Note (optional)</label><input id="an"></div>
       </div>
-      <button class="btn" id="asg">Assign and go to label</button></div>`
+      <button class="btn" id="asg">Assign</button> <button class="btn sec" id="asgp">Assign and print label</button></div>`
     : '<div class="card"><h2>Not assigned yet</h2><p>This asset has not been placed in a property yet. The Projects team will assign it.</p></div>';
 
   view.innerHTML = `
@@ -319,17 +470,20 @@ async function viewAsset(id) {
         : '<option value="">Choose a property first</option>';
     };
     $('#ap').onchange = fillAr; fillAr();
-    $('#asg').onclick = async () => {
+    const doAssign = async print => {
       try {
         const p = $('#ap').value, r = $('#ar').value, st = $('#as').value;
         if (!p || !r || !st) return fail(new Error('Choose a property, a room (or Store) and a status'));
-        $('#asg').disabled = true;
+        $('#asg').disabled = true; $('#asgp').disabled = true;
         const toStore = r === 'STORE';
         const { error } = await sb.rpc('assign_asset', { p_asset: a.id, p_property: p, p_room: toStore ? null : r, p_to_store: toStore, p_status: st, p_note: $('#an').value.trim() || null });
         if (error) throw error;
-        toast('Assigned. The label is ready to print.'); go('#/print/' + a.id);
-      } catch (e) { $('#asg').disabled = false; fail(e); }
+        if (print) { toast('Assigned. The label is ready to print.'); go('#/print/' + a.id); }
+        else { toast('Assigned.'); viewAsset(a.id); }
+      } catch (e) { $('#asg').disabled = false; $('#asgp').disabled = false; fail(e); }
     };
+    $('#asg').onclick = () => doAssign(false);
+    $('#asgp').onclick = () => doAssign(true);
     return;
   }
 
@@ -401,7 +555,7 @@ async function viewForm(id) {
       <div><label>Purchase cost (per item)</label><input id="pc" type="number" step="0.01" value="${esc(v.purchase_cost)}"></div>
       <div><label>Vendor name</label><input id="vn" value="${esc(v.vendor)}"></div>
       <div><label>Warranty valid until</label><input id="wu" type="date" value="${esc(v.warranty_until)}"></div>
-      ${addMode ? '<div><label>Number of copies (each gets its own tag and QR)</label><input id="nc" type="number" min="1" max="500" value="1"></div>' : ''}
+      ${addMode ? '<div><label>Number of copies (each gets its own tag and QR)</label><input id="nc" type="number" min="1" max="10000" value="1"></div>' : ''}
     </div>
     <label>Notes</label><textarea id="nt">${esc(v.notes)}</textarea>
     <label>Photo (optional) ${v.photo_url ? '- a photo exists; choose a new one to replace it' : ''}</label>
@@ -436,7 +590,7 @@ async function viewForm(id) {
     try {
       if (!$('#it').value.trim()) return fail(new Error('Item type is required'));
       const copies = a ? 1 : Math.floor(Number($('#nc').value));
-      if (!a && !(copies >= 1 && copies <= 500)) return fail(new Error('Number of copies must be between 1 and 500'));
+      if (!a && !(copies >= 1 && copies <= 10000)) return fail(new Error('Number of copies must be between 1 and 10,000'));
       let loc = {};
       if (!unassignedEdit) {
         const p = $('#pr').value;
@@ -467,13 +621,23 @@ async function viewForm(id) {
         const { error } = await sb.from('assets').update(row).eq('id', a.id); if (error) throw error;
         toast('Saved'); go('#/asset/' + a.id);
       } else {
-        const { data, error } = await sb.from('assets').insert(Array.from({ length: copies }, () => row)).select('id');
-        if (error) throw error;
+        const data = [];
+        try {
+          for (let i = 0; i < copies; i += CHUNK) {
+            if (copies > CHUNK) $('#save').textContent = `Creating ${i} of ${copies}...`;
+            const n = Math.min(CHUNK, copies - i);
+            const { data: part, error } = await sb.from('assets').insert(Array.from({ length: n }, () => row)).select('id');
+            if (error) throw error;
+            data.push(...part);
+          }
+        } catch (e) {
+          throw new Error(data.length ? `Stopped after ${data.length} of ${copies} assets were created: ${e.message || e}. Check the asset list before trying again.` : e.message || e);
+        }
         if (copies === 1) { toast('Saved'); go('#/asset/' + data[0].id); }
         else if (loc.property_id) { S.printPre = { ids: data.map(x => x.id) }; toast(copies + ' assets created. Labels are ready to print.'); go('#/print'); }
         else { L.fp = '__none'; L.q = ''; L.ft = ''; L.fs = ''; L.page = 0; toast(copies + ' unassigned assets created. Assign each one before printing its label.'); go('#/assets'); }
       }
-    } catch (e) { $('#save').disabled = false; fail(e); }
+    } catch (e) { $('#save').disabled = false; $('#save').textContent = 'Save'; fail(e); }
   };
 }
 
@@ -495,7 +659,7 @@ async function viewPrint(preId) {
       <div><label>3. Asset</label><select id="pa"></select></div>
     </div>
     <button class="btn" id="gen">Show labels</button><button class="btn sec" id="prt">Print this page of labels</button>
-    <p class="mute">Every label reads "${esc(LABEL_TITLE)}" with the QR and tag number. Up to ${LABELS_PER} labels are shown per page; use Next for the rest. Print on A4 at 100% scale.</p></div>
+    <p class="mute">Every label reads "${esc(LABEL_TITLE)}" with the QR and tag number. Labels are ${LABEL_MM} mm square, 15 per A4 sheet. ${LABELS_PER} labels (6 sheets) are shown at a time; use Next labels for the rest. In the print window choose A4, Scale 100%, Margins None, and untick Headers and footers.</p></div>
     <div id="labels" class="labels"></div>
     <div class="noprint"><p id="pg" class="mute"></p><button class="btn sec" id="lprev">Previous labels</button><button class="btn sec" id="lnext">Next labels</button></div>`;
   const roomFilter = q => { const r = $('#pr').value; return r === 'STORE' ? q.eq('in_store', true) : (r ? q.eq('room_id', r) : q); };
@@ -529,11 +693,13 @@ async function viewPrint(preId) {
     const got = rows.length, skipped = rows.filter(a => !a.property_id).length;
     rows = rows.filter(a => a.property_id); // an asset needs a property and room before its label prints
     if (!rows.length) { box.innerHTML = '<p class="mute">No assets with a property and room match.</p>'; $('#pg').textContent = skipped ? skipped + ' unassigned asset(s) skipped. Assign them first.' : ''; return; }
-    rows.forEach(a => {
+    let sheet = null;
+    rows.forEach((a, i) => {
+      if (i % 15 === 0) { sheet = document.createElement('div'); sheet.className = 'sheet'; box.appendChild(sheet); }
       const d = document.createElement('div'); d.className = 'label';
-      d.innerHTML = '<span class="ttl">' + esc(LABEL_TITLE) + '</span><div class="qr"></div><b>' + tagOf(a) + '</b><span>' + esc(a.item_type) + '</span><span>' + esc(propName(a.property_id)) + ' / ' + esc(roomLabel(a)) + '</span>';
-      box.appendChild(d);
-      new QRCode(d.querySelector('.qr'), { text: qrLink(a.id), width: 110, height: 110, correctLevel: QRCode.CorrectLevel.M });
+      d.innerHTML = '<span class="ttl">' + esc(LABEL_TITLE) + '</span><div class="qr"></div><b>' + tagOf(a) + '</b><span class="ln">' + esc(a.item_type) + '</span><span class="ln">' + esc(propName(a.property_id)) + ' / ' + esc(roomLabel(a)) + '</span>';
+      sheet.appendChild(d);
+      new QRCode(d.querySelector('.qr'), { text: qrLink(a.id), width: 113, height: 113, correctLevel: QRCode.CorrectLevel.M });
     });
     $('#pg').textContent = `Labels ${from + 1}-${from + got} of ${total}` + (skipped ? ` (${skipped} unassigned skipped - assign them first)` : '');
     $('#lprev').disabled = st.page === 0; $('#lnext').disabled = from + got >= total;
@@ -551,7 +717,7 @@ async function viewPrint(preId) {
   });
   if (S.props.length) { fillRooms(); await fillAssets(); }
   if (st.ids) {
-    $('#bn').textContent = st.ids.length === 1 ? 'Showing the label for the selected asset. Change the dropdowns and press Show labels to print others.' : `Showing labels for the ${st.ids.length} assets you just created or imported. Change the dropdowns and press Show labels to print others.`;
+    $('#bn').textContent = st.ids.length === 1 ? 'Showing the label for the selected asset. Change the dropdowns and press Show labels to print others.' : `Showing labels for the ${st.ids.length} assets you just created, imported or assigned. Change the dropdowns and press Show labels to print others.`;
     showLabels();
   }
 }
@@ -593,7 +759,7 @@ const IMPORT_COLS = [
   ['vendor', 'No', 'Vendor name', 'ABC Furniture'],
   ['warranty_until', 'No', 'Last day of warranty, YYYY-MM-DD', '2027-04-14'],
   ['notes', 'No', 'Any note', ''],
-  ['quantity', 'No', 'How many identical items this row creates; each gets its own tag and QR (blank = 1, max 1000)', '10']
+  ['quantity', 'No', 'How many identical items this row creates; each gets its own tag and QR (blank = 1, max 10,000)', '10']
 ];
 const IMPORT_REQUIRED = ['item_type', 'property', 'room', 'status']; // these headers must exist in row 1
 const normKey = k => String(k).trim().toLowerCase().replace(/[\s-]+/g, '_');
@@ -665,7 +831,7 @@ function validateRows(rawRows, autoRooms) {
     const wu = parseDate(r.warranty_until); if (!wu.ok) bad.push('warranty_until is not a valid date');
     const pc = parseCost(r.purchase_cost); if (!pc.ok) bad.push('purchase_cost must be a number');
     let qty = 1;
-    if (!isBlank(r.quantity)) { qty = Number(r.quantity); if (!Number.isInteger(qty) || qty < 1 || qty > 1000) bad.push('quantity must be a whole number from 1 to 1000'); }
+    if (!isBlank(r.quantity)) { qty = Number(r.quantity); if (!Number.isInteger(qty) || qty < 1 || qty > 10000) bad.push('quantity must be a whole number from 1 to 10,000'); }
     if (bad.length) { errors.push(`Row ${line}: ` + bad.join('; ')); return; }
     units += qty;
     rows.push({
