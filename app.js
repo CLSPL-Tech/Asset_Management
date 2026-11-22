@@ -14,8 +14,8 @@ const LABELS_PER = 90;  // labels per print batch (6 A4 sheets of 15)
 const CHUNK = 500;      // rows per request when creating many assets
 
 const TABS = {
-  procurement: [['summary', 'Summary'], ['assets', 'Assets'], ['print', 'Print QR'], ['import', 'Import'], ['scan', 'Scan'], ['audit', 'To audit'], ['report', 'Report'], ['properties', 'Properties'], ['users', 'Users']],
-  projects: [['summary', 'Summary'], ['assets', 'Assets'], ['print', 'Print QR'], ['import', 'Import'], ['scan', 'Scan'], ['audit', 'To audit'], ['report', 'Report'], ['properties', 'Properties']],
+  procurement: [['summary', 'Summary'], ['assets', 'Assets'], ['print', 'Print QR'], ['import', 'Import'], ['scan', 'Scan'], ['audit', 'To audit'], ['report', 'Report'], ['users', 'Users']],
+  projects: [['summary', 'Summary'], ['assets', 'Assets'], ['print', 'Print QR'], ['import', 'Import'], ['scan', 'Scan'], ['audit', 'To audit'], ['report', 'Report']],
   auditor: [['scan', 'Scan'], ['audit', 'To audit'], ['report', 'Report'], ['assets', 'Assets'], ['summary', 'Summary']]
 };
 const ROLE_LABEL = { pending: 'Waiting for approval', procurement: 'Procurement', projects: 'Projects team', auditor: 'Auditor' };
@@ -186,7 +186,7 @@ async function route() {
     else if (v === 'scan') viewScan();
     else if (v === 'audit') await viewAudit();
     else if (v === 'report') await viewReport();
-    else if (v === 'properties' && can('procurement', 'projects')) await viewProperties(arg, parts[3]);
+    else if (v === 'properties') go('#/assets');   // merged into the Assets tab
     else if (v === 'users' && can('procurement')) await viewUsers();
     else view.innerHTML = '<p>Page not available for your role.</p>';
   } catch (e) { fail(e); }
@@ -258,19 +258,21 @@ async function viewAssets() {
   const canDel = can('procurement');
   view.innerHTML = `<div class="card">
     <h2>Assets ${canEdit() ? '<button class="btn" id="add" style="float:right;margin:0">+ Add asset</button>' : ''}</h2>
+    <label>Property</label><div id="pchips" class="chips"><span class="mute">Loading...</span></div>
+    <div id="rchips" class="chips"></div>
     <div class="row">
       <div><label>Search</label><input id="q" value="${esc(L.q)}" placeholder="tag no., item, description, vendor"></div>
-      <div><label>Property</label><select id="fp"><option value="">All</option><option value="__none" ${L.fp === '__none' ? 'selected' : ''}>Unassigned (not placed yet)</option>${S.props.map(p => `<option value="${p.id}" ${p.id === L.fp ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></div>
       <div><label>Item</label><select id="ft"><option value="">All</option>${S.types.map(t => `<option ${t === L.ft ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select></div>
       <div><label>Status</label><select id="fs"><option value="">All</option>${STATUSES.map(s => `<option value="${s}" ${s === L.fs ? 'selected' : ''}>${cap(s)}</option>`).join('')}</select></div>
       <div><label>Audit</label><select id="fa"><option value="">All</option><option value="yes" ${L.fa === 'yes' ? 'selected' : ''}>Audited at least once</option><option value="no" ${L.fa === 'no' ? 'selected' : ''}>Never audited</option><option value="before" ${L.fa === 'before' ? 'selected' : ''}>Not audited since...</option></select></div>
       <div id="fdbox" style="${L.fa === 'before' ? '' : 'display:none'}"><label>Date</label><input id="fd" type="date" value="${esc(L.fd)}"></div>
     </div></div>
-    ${L.fr ? `<div class="card"><p>Room filter: <b>${esc(L.frn || 'selected room')}</b> <a href="#" id="clrr">Show the whole property</a></p></div>` : ''}
+    <div id="psettings"></div>
     <div id="bulkbox"></div>
     <div id="delbox"></div>
     <div class="card">
     <p class="mute" id="count"></p>
+    ${canEdit() && L.fp && L.fp !== '__none' ? '<button class="btn sec" id="lprint">Print labels for these</button>' : ''}
     <div class="tw"><table><thead id="thead"></thead><tbody id="rows"></tbody></table></div>
     <button class="btn sec" id="prev">Previous</button><button class="btn sec" id="next">Next</button></div>`;
   if ($('#add')) $('#add').onclick = () => go('#/form');
@@ -476,7 +478,6 @@ async function viewAssets() {
   let timer;
   const changed = () => { SEL.clear(); L.page = 0; updateSelNote(); updateDelNote(); draw(); updateBulkInfo(); };
   $('#q').oninput = () => { clearTimeout(timer); timer = setTimeout(() => { L.q = $('#q').value; changed(); }, 350); };
-  $('#fp').onchange = () => { L.fp = $('#fp').value; L.fr = ''; SEL.clear(); L.page = 0; renderBulk(); updateDelNote(); draw(); };
   $('#fa').onchange = () => { L.fa = $('#fa').value; $('#fdbox').style.display = L.fa === 'before' ? '' : 'none'; if (L.fa === 'before' && !L.fd) { L.fd = new Date(Date.now() - 365 * 864e5).toISOString().slice(0, 10); $('#fd').value = L.fd; } changed(); };
   $('#fd').onchange = () => { L.fd = $('#fd').value; changed(); };
   ['ft', 'fs'].forEach(i => { $('#' + i).onchange = () => { L[i] = $('#' + i).value; changed(); }; });
@@ -486,8 +487,71 @@ async function viewAssets() {
     if (cb) { if (cb.checked) SEL.add(cb.dataset.id); else SEL.delete(cb.dataset.id); updateSelNote(); updateDelNote(); return; }
     const tr = e.target.closest('tr[data-id]'); if (tr) go('#/asset/' + tr.dataset.id);
   };
-  if ($('#clrr')) $('#clrr').onclick = e => { e.preventDefault(); L.fr = ''; L.frn = ''; viewAssets(); };
   renderBulk(); renderDel();
+
+  /* ----- property and room chips, property settings ----- */
+  const goFilter = (fp, fr, frn) => { Object.assign(L, { fp, fr: fr || '', frn: frn || '', page: 0 }); SEL.clear(); viewAssets(); };
+  const renderPlaces = async () => {
+    const { data: s, error } = await sb.rpc('asset_summary'); if (error) return fail(error);
+    const by = new Map(s.by_property.map(x => [x.id, x]));
+    const chip = (on, attrs, label, n) => `<button class="chip ${on ? 'on' : ''}" ${attrs}>${esc(label)} <small>${n}</small></button>`;
+    $('#pchips').innerHTML = chip(!L.fp, 'data-p=""', 'All', s.total)
+      + S.props.map(p => chip(L.fp === p.id, `data-p="${p.id}"`, p.name, (by.get(p.id) || { total: 0 }).total)).join('')
+      + (s.unassigned.total || L.fp === '__none' ? chip(L.fp === '__none', 'data-p="__none"', 'Not assigned yet', s.unassigned.total) : '');
+    $('#pchips').onclick = e => { const b = e.target.closest('button[data-p]'); if (b) goFilter(b.dataset.p); };
+    const real = L.fp && L.fp !== '__none' ? propById(L.fp) : null;
+    if (real) {
+      const { data, error: er } = await sb.rpc('audit_pending', { p_property: real.id, p_before: null }); if (er) return fail(er);
+      const rows = (data || []).filter(r => !r.in_store || Number(r.total) > 0).sort((x, y) => x.in_store - y.in_store || x.room_name.localeCompare(y.room_name, undefined, { numeric: true }));
+      $('#rchips').innerHTML = '<label style="width:100%">Room / area</label>' + chip(!L.fr, 'data-r=""', 'All rooms', rows.reduce((n, r) => n + Number(r.total), 0))
+        + rows.map(r => chip(r.in_store ? L.fr === 'STORE' : L.fr === r.room_id, `data-r="${r.in_store ? 'STORE' : r.room_id}" data-n="${esc(r.room_name)}"`, r.room_name, r.total)).join('');
+      $('#rchips').onclick = e => { const b = e.target.closest('button[data-r]'); if (b) goFilter(real.id, b.dataset.r, b.dataset.n); };
+    } else $('#rchips').innerHTML = '';
+    renderSettings(real);
+  };
+  const renderSettings = real => {
+    const box = $('#psettings'), full = can('procurement');
+    if (!real) {
+      box.innerHTML = full && !L.fp ? `<details class="card"><summary><b>+ Add property</b></summary>${propFormHtml}</details>` : '';
+      if (box.innerHTML) wirePropForm(null, () => viewAssets());
+      return;
+    }
+    const rooms = naturalRooms(real.id);
+    box.innerHTML = full || canEdit() ? `<details class="card"><summary><b>${esc(real.name)}: settings and rooms</b></summary>
+      ${full ? `<p class="mute">${real.latitude != null ? 'Map pin saved' : 'No map pin yet'} &middot; audit radius ${real.audit_radius_m || 500} m</p>${propFormHtml}<hr style="margin:16px 0;border:0;border-top:1px solid #ddd">` : ''}
+      ${canEdit() ? `<h3>Rooms / areas</h3><div id="rl" style="margin:8px 0">${rooms.map(r => `<span class="badge working" style="margin:2px">${esc(r.name)} <a href="#" data-dr="${r.id}" style="color:inherit">x</a></span>`).join(' ') || '<span class="mute">No rooms yet.</span>'}</div>
+      <label>Add rooms (separate with commas or new lines; words like Lobby are fine)</label><textarea id="rn" placeholder="101, 102, Lobby, Gym"></textarea><button class="btn" id="ar">Add rooms</button>` : ''}</details>` : '';
+    if (full) wirePropForm(real, () => viewAssets());
+    if (!canEdit()) return;
+    $('#rl').onclick = async e => {
+      const d = e.target.closest('[data-dr]'); if (!d) return; e.preventDefault();
+      if (!confirm('Delete this room? Assets in it will show no room.')) return;
+      const { error } = await sb.from('rooms').delete().eq('id', d.dataset.dr); if (error) return fail(error);
+      if (L.fr === d.dataset.dr) { L.fr = ''; L.frn = ''; }
+      await loadMaster(); viewAssets();
+    };
+    $('#ar').onclick = async () => {
+      try {
+        const names = [...new Set($('#rn').value.split(/[,\n]/).map(x => x.trim()).filter(Boolean))];
+        if (!names.length) return;
+        const { error } = await sb.from('rooms').upsert(names.map(n => ({ property_id: real.id, name: n })), { onConflict: 'property_id,name', ignoreDuplicates: true });
+        if (error) throw error;
+        await loadMaster(); toast(names.length + ' room(s) added'); viewAssets();
+      } catch (e) { fail(e); }
+    };
+  };
+  if ($('#lprint')) $('#lprint').onclick = async () => {
+    try {
+      let ids = [];
+      for (let from = 0; ; from += 1000) {
+        const { data, error } = await applyFilters(sb.from('assets').select('id')).order('tag_no').range(from, from + 999); if (error) throw error;
+        ids = ids.concat(data.map(x => x.id)); if (data.length < 1000) break;
+      }
+      if (!ids.length) return fail(new Error('No assets match'));
+      S.printPre = { ids }; go('#/print');
+    } catch (e) { fail(e); }
+  };
+  renderPlaces();
   draw();
 }
 
@@ -1187,7 +1251,7 @@ async function viewReport() {
   load();
 }
 
-/* ---------- Properties: property -> rooms -> assets, on one screen ---------- */
+/* ---------- Property form (used inside the Assets tab) ---------- */
 const propFormHtml = `<div class="row">
     <div><label>Property name *</label><input id="pn"></div>
     <div><label>Store location (name or description)</label><input id="ps" placeholder="e.g. Basement store room"></div>
@@ -1213,109 +1277,6 @@ function wirePropForm(p, after) {
       await loadMaster(); toast('Property saved'); after();
     } catch (e) { fail(e); }
   };
-}
-
-async function viewProperties(arg, sub) {
-  const p = arg ? propById(arg) : null;
-  if (arg && !p) { go('#/properties'); return; }
-  if (!arg) return propsHome();
-  if (sub) return roomAssets(p, sub);
-  return propDetail(p);
-}
-
-async function propsHome() {
-  const full = can('procurement');
-  const { data: s, error } = await sb.rpc('asset_summary'); if (error) throw error;
-  const by = new Map(s.by_property.map(x => [x.id, x]));
-  view.innerHTML = `<div class="card"><h2>Properties ${full ? '<button class="btn" id="addp" style="float:right;margin:0">+ Add property</button>' : ''}</h2>
-    <p class="mute">Tap a property to see its rooms and assets${full ? ', and to edit it' : ''}.</p>
-    <div class="tw"><table><thead><tr><th>Property</th><th class="num">Assets</th><th class="num">Working</th><th class="num">Repairable</th><th class="num">Damaged</th><th class="num">Audited</th><th class="num">Rooms</th></tr></thead><tbody>
-    ${S.props.map(p => { const x = by.get(p.id) || { total: 0, working: 0, repairable: 0, damaged: 0, audited: 0 }; return `<tr class="click" data-id="${p.id}"><td>${esc(p.name)}</td><td class="num">${x.total}</td><td class="num">${x.working}</td><td class="num">${x.repairable}</td><td class="num">${x.damaged}</td><td class="num">${x.audited}</td><td class="num">${S.rooms.filter(r => r.property_id === p.id).length}</td></tr>`; }).join('') || '<tr><td colspan="7" class="mute">No properties yet.</td></tr>'}
-    ${s.unassigned.total ? `<tr class="click" data-un="1"><td><i>Not assigned to a property yet</i></td><td class="num">${s.unassigned.total}</td><td colspan="5"></td></tr>` : ''}
-    </tbody></table></div></div>
-    ${full ? '<div class="card" id="addcard" style="display:none"><h2>Add property</h2>' + propFormHtml + '</div>' : ''}`;
-  view.querySelector('tbody').onclick = e => {
-    const tr = e.target.closest('tr'); if (!tr) return;
-    if (tr.dataset.un) { Object.assign(L, { page: 0, q: '', fp: '__none', ft: '', fs: '', fa: '', fd: '', fr: '' }); go('#/assets'); }
-    else go('#/properties/' + tr.dataset.id);
-  };
-  if (full) {
-    wirePropForm(null, propsHome);
-    $('#addp').onclick = () => { $('#addcard').style.display = ''; $('#pn').focus(); };
-  }
-}
-
-async function propDetail(p) {
-  const full = can('procurement');
-  const { data, error } = await sb.rpc('audit_pending', { p_property: p.id, p_before: null }); if (error) throw error;
-  const rows = (data || []).filter(r => !r.in_store || Number(r.total) > 0).sort((x, y) => x.in_store - y.in_store || x.room_name.localeCompare(y.room_name, undefined, { numeric: true }));
-  const total = rows.reduce((n, r) => n + Number(r.total), 0), pend = rows.reduce((n, r) => n + Number(r.pending), 0);
-  view.innerHTML = `<div class="card"><p><a href="#/properties">&larr; All properties</a></p>
-    <h2>${esc(p.name)}</h2>
-    <p class="mute">${p.latitude != null ? 'Map pin saved' : 'No map pin yet'} &middot; audit radius ${p.audit_radius_m || 500} m &middot; Store: ${esc(p.store_location) || '-'}</p>
-    <p><b>${total}</b> asset(s) in rooms and store, <b>${pend}</b> never audited.</p>
-    <button class="btn sec" id="pall">All assets of this property</button><button class="btn sec" id="paud">To audit</button></div>
-    <div class="card"><h2>Rooms / areas</h2>
-    <div class="tw"><table><thead><tr><th>Room / area</th><th class="num">Assets</th><th class="num">Never audited</th>${canEdit() ? '<th></th>' : ''}</tr></thead><tbody>
-    ${rows.map(r => `<tr class="click" data-r="${r.in_store ? 'STORE' : r.room_id}"><td>${esc(r.room_name)}</td><td class="num">${r.total}</td><td class="num">${r.pending}</td>${canEdit() ? `<td>${r.in_store ? '' : `<a href="#" data-dr="${r.room_id}">delete</a>`}</td>` : ''}</tr>`).join('') || '<tr><td colspan="4" class="mute">No rooms yet.</td></tr>'}
-    </tbody></table></div>
-    ${canEdit() ? `<label>Add rooms (separate with commas or new lines; words like Lobby are fine)</label><textarea id="rn" placeholder="101, 102, Lobby, Gym"></textarea><button class="btn" id="ar">Add rooms</button>` : ''}</div>
-    ${full ? '<details class="card"><summary><b>Edit property</b></summary>' + propFormHtml + '</details>' : ''}`;
-  $('#pall').onclick = () => { Object.assign(L, { page: 0, q: '', fp: p.id, ft: '', fs: '', fa: '', fd: '', fr: '' }); go('#/assets'); };
-  $('#paud').onclick = () => { AUD.prop = p.id; go('#/audit'); };
-  view.querySelector('tbody').onclick = async e => {
-    const d = e.target.closest('[data-dr]');
-    if (d) {
-      e.preventDefault();
-      if (!confirm('Delete this room? Assets in it will show no room.')) return;
-      const { error: er } = await sb.from('rooms').delete().eq('id', d.dataset.dr); if (er) return fail(er);
-      await loadMaster(); return propDetail(p);
-    }
-    const tr = e.target.closest('tr[data-r]'); if (tr) go('#/properties/' + p.id + '/' + tr.dataset.r);
-  };
-  if (canEdit()) $('#ar').onclick = async () => {
-    try {
-      const names = [...new Set($('#rn').value.split(/[,\n]/).map(x => x.trim()).filter(Boolean))];
-      if (!names.length) return;
-      const { error: er } = await sb.from('rooms').upsert(names.map(n => ({ property_id: p.id, name: n })), { onConflict: 'property_id,name', ignoreDuplicates: true });
-      if (er) throw er;
-      await loadMaster(); toast(names.length + ' room(s) added'); propDetail(p);
-    } catch (e) { fail(e); }
-  };
-  if (full) wirePropForm(p, () => propDetail(propById(p.id)));
-}
-
-async function roomAssets(p, sub) {
-  const isStore = sub === 'STORE', room = isStore ? null : roomById(sub), name = isStore ? 'Store' : (room ? room.name : '?');
-  let page = 0;
-  view.innerHTML = `<div class="card"><p><a href="#/properties/${p.id}">&larr; ${esc(p.name)}</a></p>
-    <h2>${esc(p.name)} / ${esc(name)}</h2>
-    <p class="mute" id="rc"></p>
-    ${canEdit() ? '<button class="btn sec" id="rprint">Print labels for this room</button>' : ''}
-    <div class="tw"><table><thead><tr><th>Tag</th><th>Item</th><th>Size</th><th>Status</th><th>Last audited</th></tr></thead><tbody id="rrows"></tbody></table></div>
-    <button class="btn sec" id="rprev">Previous</button><button class="btn sec" id="rnext">Next</button></div>`;
-  const q = () => { let x = sb.from('assets').select('*', { count: 'exact' }).eq('property_id', p.id); return isStore ? x.eq('in_store', true) : x.eq('room_id', sub); };
-  const draw = async () => {
-    const from = page * PAGE;
-    const { data, count, error } = await q().order('tag_no').range(from, from + PAGE - 1); if (error) return fail(error);
-    $('#rc').textContent = count ? `Showing ${from + 1}-${from + data.length} of ${count}` : 'No assets in this room yet.';
-    $('#rrows').innerHTML = data.map(a => `<tr class="click" data-id="${a.id}"><td>${tagOf(a)}</td><td>${esc(a.item_type)}${a.name ? '<br><span class="mute">' + esc(a.name) + '</span>' : ''}</td><td>${esc(a.size)}</td><td>${badge(a.status)}</td><td>${a.last_audited_at ? esc(new Date(a.last_audited_at).toLocaleDateString()) : '<span class="mute">never</span>'}</td></tr>`).join('');
-    $('#rprev').disabled = page === 0; $('#rnext').disabled = from + data.length >= count;
-  };
-  $('#rrows').onclick = e => { const tr = e.target.closest('tr[data-id]'); if (tr) go('#/asset/' + tr.dataset.id); };
-  $('#rprev').onclick = () => { page--; draw(); }; $('#rnext').onclick = () => { page++; draw(); };
-  if ($('#rprint')) $('#rprint').onclick = async () => {
-    try {
-      let ids = [];
-      for (let from = 0; ; from += 1000) {
-        const { data, error } = await q().select('id').order('tag_no').range(from, from + 999); if (error) throw error;
-        ids = ids.concat(data.map(x => x.id)); if (data.length < 1000) break;
-      }
-      if (!ids.length) return fail(new Error('No assets in this room'));
-      S.printPre = { ids }; go('#/print');
-    } catch (e) { fail(e); }
-  };
-  draw();
 }
 
 /* ---------- Users (Procurement) ---------- */

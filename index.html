@@ -46,6 +46,9 @@
   .label .qr { display:flex; justify-content:center; width:30mm; height:30mm; } .label .qr img, .label .qr canvas { width:30mm !important; height:30mm !important; }
   .label b { display:block; font-size:10pt; line-height:1.1; }
   .label span.ln { font-size:7pt; display:block; line-height:1.15; max-width:100%; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .chips { display:flex; flex-wrap:wrap; gap:6px; max-height:130px; overflow:auto; margin:4px 0 10px; }
+  .chip { border:1px solid var(--line); background:#fff; border-radius:999px; padding:6px 12px; font-size:14px; cursor:pointer; margin:0; width:auto; color:inherit; }
+  .chip small { color:var(--mute); } .chip.on { background:var(--brand); color:#fff; border-color:var(--brand); } .chip.on small { color:#dbe7ff; }
   .chk { display:inline-block; margin:3px 14px 3px 0; font-size:14px; color:var(--fg,#222); } .chk input { width:auto; margin-right:5px; }
   .roomlist { max-height:220px; overflow:auto; border:1px solid #ddd; border-radius:8px; padding:6px 10px; }
   @media (max-width:560px) { .sheet { grid-template-columns:repeat(2,var(--lbl)); } }
