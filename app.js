@@ -14,9 +14,9 @@ const LABELS_PER = 90;  // labels per print batch (6 A4 sheets of 15)
 const CHUNK = 500;      // rows per request when creating many assets
 
 const TABS = {
-  procurement: [['summary', 'Summary'], ['assets', 'Assets'], ['print', 'Print QR'], ['import', 'Import'], ['scan', 'Scan'], ['properties', 'Properties'], ['users', 'Users']],
-  projects: [['summary', 'Summary'], ['assets', 'Assets'], ['print', 'Print QR'], ['import', 'Import'], ['scan', 'Scan']],
-  auditor: [['scan', 'Scan'], ['assets', 'Assets'], ['summary', 'Summary']]
+  procurement: [['summary', 'Summary'], ['assets', 'Assets'], ['print', 'Print QR'], ['import', 'Import'], ['scan', 'Scan'], ['audit', 'To audit'], ['report', 'Report'], ['properties', 'Properties'], ['users', 'Users']],
+  projects: [['summary', 'Summary'], ['assets', 'Assets'], ['print', 'Print QR'], ['import', 'Import'], ['scan', 'Scan'], ['audit', 'To audit'], ['report', 'Report'], ['properties', 'Properties']],
+  auditor: [['scan', 'Scan'], ['audit', 'To audit'], ['report', 'Report'], ['assets', 'Assets'], ['summary', 'Summary']]
 };
 const ROLE_LABEL = { pending: 'Waiting for approval', procurement: 'Procurement', projects: 'Projects team', auditor: 'Auditor' };
 const STATUSES = ['working', 'repairable', 'damaged'];
@@ -184,7 +184,9 @@ async function route() {
     else if (v === 'print') await viewPrint(arg);
     else if (v === 'import') viewImport();
     else if (v === 'scan') viewScan();
-    else if (v === 'properties' && can('procurement')) viewProperties();
+    else if (v === 'audit') await viewAudit();
+    else if (v === 'report') await viewReport();
+    else if (v === 'properties' && can('procurement', 'projects')) await viewProperties(arg, parts[3]);
     else if (v === 'users' && can('procurement')) await viewUsers();
     else view.innerHTML = '<p>Page not available for your role.</p>';
   } catch (e) { fail(e); }
@@ -219,7 +221,7 @@ async function viewSummary() {
 }
 
 /* ---------- Asset list (paged, filtered in the database) + bulk assign ---------- */
-const L = { page: 0, q: '', fp: '', ft: '', fs: '', fa: '', fd: '' };   // fa: '' | yes | no | before (with date fd)
+const L = { page: 0, q: '', fp: '', ft: '', fs: '', fa: '', fd: '', fr: '', frn: '' };   // fr: room id or 'STORE' (set from the To audit tab)   // fa: '' | yes | no | before (with date fd)
 const auditArgs = () => (L.fa === 'yes' || L.fa === 'no') ? { audit: L.fa, before: null } : (L.fa === 'before' && /^\d{4}-\d{2}-\d{2}$/.test(L.fd) ? { audit: 'before', before: L.fd } : { audit: null, before: null });
 const SEL = new Set();   // ticked unassigned assets (bulk assign)
 const BULK_CHUNK = 2000; // assets per request when bulk assigning
@@ -228,6 +230,7 @@ function applyFilters(q) {
   if (L.fp === '__none') q = q.is('property_id', null); else if (L.fp) q = q.eq('property_id', L.fp);
   if (L.ft) q = q.eq('item_type', L.ft);
   if (L.fs) q = q.eq('status', L.fs);
+  if (L.fr === 'STORE') q = q.eq('in_store', true); else if (L.fr) q = q.eq('room_id', L.fr);
   const au = auditArgs();
   if (au.audit === 'yes') q = q.not('last_audited_at', 'is', null);
   else if (au.audit === 'no') q = q.is('last_audited_at', null);
@@ -236,7 +239,7 @@ function applyFilters(q) {
   if (t) {
     const n = t.match(/^(?:ast-?)?0*(\d+)$/i);
     if (n) q = q.eq('tag_no', Number(n[1]));
-    else { const w = searchText(); if (w) q = q.or(`item_type.ilike.%${w}%,description.ilike.%${w}%,vendor.ilike.%${w}%`); }
+    else { const w = searchText(); if (w) q = q.or(`item_type.ilike.%${w}%,name.ilike.%${w}%,description.ilike.%${w}%,vendor.ilike.%${w}%`); }
   }
   return q;
 }
@@ -244,7 +247,7 @@ function applyFilters(q) {
 function bulkQuery() {
   let q = sb.from('assets').select('id', { count: 'exact', head: true }).is('property_id', null);
   if (L.ft) q = q.eq('item_type', L.ft);
-  const w = searchText(); if (w) q = q.or(`item_type.ilike.%${w}%,description.ilike.%${w}%,vendor.ilike.%${w}%`);
+  const w = searchText(); if (w) q = q.or(`item_type.ilike.%${w}%,name.ilike.%${w}%,description.ilike.%${w}%,vendor.ilike.%${w}%`);
   return q;
 }
 const naturalRooms = pid => S.rooms.filter(r => r.property_id === pid).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
@@ -263,6 +266,7 @@ async function viewAssets() {
       <div><label>Audit</label><select id="fa"><option value="">All</option><option value="yes" ${L.fa === 'yes' ? 'selected' : ''}>Audited at least once</option><option value="no" ${L.fa === 'no' ? 'selected' : ''}>Never audited</option><option value="before" ${L.fa === 'before' ? 'selected' : ''}>Not audited since...</option></select></div>
       <div id="fdbox" style="${L.fa === 'before' ? '' : 'display:none'}"><label>Date</label><input id="fd" type="date" value="${esc(L.fd)}"></div>
     </div></div>
+    ${L.fr ? `<div class="card"><p>Room filter: <b>${esc(L.frn || 'selected room')}</b> <a href="#" id="clrr">Show the whole property</a></p></div>` : ''}
     <div id="bulkbox"></div>
     <div id="delbox"></div>
     <div class="card">
@@ -276,9 +280,9 @@ async function viewAssets() {
     const from = L.page * PAGE;
     const { data, count, error } = await applyFilters(sb.from('assets').select('*', { count: 'exact' })).order('tag_no').range(from, from + PAGE - 1);
     if (error) return fail(error);
-    $('#thead').innerHTML = `<tr>${sel ? '<th><input type="checkbox" id="selall" title="Tick all on this page"></th>' : ''}<th>Tag</th><th>Item</th><th>Description</th><th>Property</th><th>Room</th><th>Status</th><th>Last audited</th><th>Warranty</th></tr>`;
+    $('#thead').innerHTML = `<tr>${sel ? '<th><input type="checkbox" id="selall" title="Tick all on this page"></th>' : ''}<th>Tag</th><th>Item</th><th>Size</th><th>Description</th><th>Property</th><th>Room</th><th>Status</th><th>Last audited</th><th>Warranty</th></tr>`;
     $('#count').textContent = count === 0 ? 'No assets match.' : `Showing ${from + 1}-${from + data.length} of ${count}`;
-    $('#rows').innerHTML = data.map(a => `<tr class="click" data-id="${a.id}">${sel ? `<td><input type="checkbox" class="sel" data-id="${a.id}" ${SEL.has(a.id) ? 'checked' : ''}></td>` : ''}<td>${tagOf(a)}</td><td>${esc(a.item_type)}</td><td>${esc(a.description)}</td><td>${esc(propName(a.property_id))}</td><td>${esc(roomLabel(a))}</td><td>${badge(a.status)}</td><td>${a.last_audited_at ? esc(new Date(a.last_audited_at).toLocaleDateString()) : '<span class="mute">-</span>'}</td><td>${esc(warrantyText(a))}</td></tr>`).join('');
+    $('#rows').innerHTML = data.map(a => `<tr class="click" data-id="${a.id}">${sel ? `<td><input type="checkbox" class="sel" data-id="${a.id}" ${SEL.has(a.id) ? 'checked' : ''}></td>` : ''}<td>${tagOf(a)}</td><td>${esc(a.item_type)}${a.name ? '<br><span class="mute">' + esc(a.name) + '</span>' : ''}</td><td>${esc(a.size)}</td><td>${esc(a.description)}</td><td>${esc(propName(a.property_id))}</td><td>${esc(roomLabel(a))}</td><td>${badge(a.status)}</td><td>${a.last_audited_at ? esc(new Date(a.last_audited_at).toLocaleDateString()) : '<span class="mute">-</span>'}</td><td>${esc(warrantyText(a))}</td></tr>`).join('');
     $('#prev').disabled = L.page === 0; $('#next').disabled = from + data.length >= count;
     if ($('#selall')) $('#selall').onchange = () => {
       document.querySelectorAll('#rows input.sel').forEach(c => { c.checked = $('#selall').checked; if (c.checked) SEL.add(c.dataset.id); else SEL.delete(c.dataset.id); });
@@ -414,6 +418,7 @@ async function viewAssets() {
   const updateDelNote = async () => {
     if (!$('#dn')) return;
     if (SEL.size) { $('#dn').textContent = `${SEL.size} ticked asset(s) will be deleted.`; $('#dgo').disabled = false; return; }
+    if (L.fr) { $('#dn').textContent = 'A room filter is on. Tick the rows to delete, or clear the room filter first.'; $('#dgo').disabled = true; return; }
     if (!delFilterActive()) { $('#dn').textContent = 'Tick rows in the list, or choose at least one filter above. Then every asset matching the filters is deleted.'; $('#dgo').disabled = true; return; }
     const { count, error } = await applyFilters(sb.from('assets').select('id', { count: 'exact', head: true }));
     if (error || !$('#dn')) return;
@@ -435,6 +440,7 @@ async function viewAssets() {
       let total, ids = null;
       if (SEL.size) { ids = [...SEL]; total = ids.length; }
       else {
+        if (L.fr) return fail(new Error('A room filter is on. Tick the rows to delete, or clear the room filter first.'));
         if (!delFilterActive()) return fail(new Error('Tick rows or choose a filter first'));
         const { count, error } = await applyFilters(sb.from('assets').select('id', { count: 'exact', head: true })); if (error) throw error;
         total = count;
@@ -470,7 +476,7 @@ async function viewAssets() {
   let timer;
   const changed = () => { SEL.clear(); L.page = 0; updateSelNote(); updateDelNote(); draw(); updateBulkInfo(); };
   $('#q').oninput = () => { clearTimeout(timer); timer = setTimeout(() => { L.q = $('#q').value; changed(); }, 350); };
-  $('#fp').onchange = () => { L.fp = $('#fp').value; SEL.clear(); L.page = 0; renderBulk(); updateDelNote(); draw(); };
+  $('#fp').onchange = () => { L.fp = $('#fp').value; L.fr = ''; SEL.clear(); L.page = 0; renderBulk(); updateDelNote(); draw(); };
   $('#fa').onchange = () => { L.fa = $('#fa').value; $('#fdbox').style.display = L.fa === 'before' ? '' : 'none'; if (L.fa === 'before' && !L.fd) { L.fd = new Date(Date.now() - 365 * 864e5).toISOString().slice(0, 10); $('#fd').value = L.fd; } changed(); };
   $('#fd').onchange = () => { L.fd = $('#fd').value; changed(); };
   ['ft', 'fs'].forEach(i => { $('#' + i).onchange = () => { L[i] = $('#' + i).value; changed(); }; });
@@ -480,6 +486,7 @@ async function viewAssets() {
     if (cb) { if (cb.checked) SEL.add(cb.dataset.id); else SEL.delete(cb.dataset.id); updateSelNote(); updateDelNote(); return; }
     const tr = e.target.closest('tr[data-id]'); if (tr) go('#/asset/' + tr.dataset.id);
   };
+  if ($('#clrr')) $('#clrr').onclick = e => { e.preventDefault(); L.fr = ''; L.frn = ''; viewAssets(); };
   renderBulk(); renderDel();
   draw();
 }
@@ -531,9 +538,12 @@ async function viewAsset(id) {
 
   view.innerHTML = `
     <div class="card">
-      <h2>${tagOf(a)} - ${esc(a.item_type)} ${badge(a.status)}</h2>
+      <h2>${tagOf(a)} - ${esc(a.name || a.item_type)} ${badge(a.status)}</h2>
       ${a.photo_url ? `<img class="photo" src="${esc(a.photo_url)}" alt="asset photo">` : ''}
       <div class="tw"><table>
+        <tr><th>Item type</th><td>${esc(a.item_type)}</td></tr>
+        <tr><th>Name</th><td>${esc(a.name) || '-'}</td></tr>
+        <tr><th>Size</th><td>${esc(a.size) || '-'}</td></tr>
         <tr><th>Description</th><td>${esc(a.description) || '-'}</td></tr>
         <tr><th>Property</th><td>${esc(propName(a.property_id))}</td></tr>
         <tr><th>Location</th><td>${esc(roomLabel(a))}</td></tr>
@@ -669,6 +679,8 @@ async function viewForm(id) {
     ${addMode ? '<p class="mute">Leave Property as "Not assigned" if the asset is only purchased. The Projects team assigns the property, room and status later, when they print its label.</p>' : ''}
     <div class="row">
       <div><label>Item type *</label><input id="it" list="tl" value="${esc(v.item_type)}" placeholder="e.g. Split AC, Chair, TV"><datalist id="tl">${S.types.map(t => `<option value="${esc(t)}">`).join('')}</datalist></div>
+      <div><label>Name (optional)</label><input id="nm2" value="${esc(v.name)}" placeholder="e.g. Executive chair, Queen bed sheet"></div>
+      <div><label>Size (optional)</label><input id="sz" value="${esc(v.size)}" placeholder="e.g. 6 x 3 ft, King, 1.5 ton"></div>
       <div><label>Description / model / serial</label><input id="ds" value="${esc(v.description)}"></div>
       ${locFields}
       <div><label>Purchase date</label><input id="pd" type="date" value="${esc(v.purchase_date)}"></div>
@@ -731,7 +743,7 @@ async function viewForm(id) {
         photo_url = sb.storage.from('asset-photos').getPublicUrl(path).data.publicUrl;
       }
       const row = {
-        item_type: $('#it').value.trim(), description: $('#ds').value.trim() || null, ...loc,
+        item_type: $('#it').value.trim(), name: $('#nm2').value.trim() || null, size: $('#sz').value.trim() || null, description: $('#ds').value.trim() || null, ...loc,
         purchase_date: $('#pd').value || null, purchase_cost: $('#pc').value === '' ? null : Number($('#pc').value),
         vendor: $('#vn').value.trim() || null, warranty_until: $('#wu').value || null, notes: $('#nt').value.trim() || null,
         photo_url, updated_at: new Date().toISOString()
@@ -755,7 +767,7 @@ async function viewForm(id) {
         }
         if (copies === 1) { toast('Saved'); go('#/asset/' + data[0].id); }
         else if (loc.property_id) { S.printPre = { ids: data.map(x => x.id) }; toast(copies + ' assets created. Labels are ready to print.'); go('#/print'); }
-        else { L.fp = '__none'; L.q = ''; L.ft = ''; L.fs = ''; L.fa = ''; L.fd = ''; L.page = 0; toast(copies + ' unassigned assets created. Assign each one before printing its label.'); go('#/assets'); }
+        else { L.fp = '__none'; L.q = ''; L.ft = ''; L.fs = ''; L.fa = ''; L.fd = ''; L.fr = ''; L.page = 0; toast(copies + ' unassigned assets created. Assign each one before printing its label.'); go('#/assets'); }
       }
     } catch (e) { $('#save').disabled = false; $('#save').textContent = 'Save'; fail(e); }
   };
@@ -817,7 +829,7 @@ async function viewPrint(preId) {
     rows.forEach((a, i) => {
       if (i % 15 === 0) { sheet = document.createElement('div'); sheet.className = 'sheet'; box.appendChild(sheet); }
       const d = document.createElement('div'); d.className = 'label';
-      d.innerHTML = '<span class="ttl">' + esc(LABEL_TITLE) + '</span><div class="qr"></div><b>' + tagOf(a) + '</b><span class="ln">' + esc(a.item_type) + '</span><span class="ln">' + esc(propName(a.property_id)) + ' / ' + esc(roomLabel(a)) + '</span>';
+      d.innerHTML = '<span class="ttl">' + esc(LABEL_TITLE) + '</span><div class="qr"></div><b>' + tagOf(a) + '</b><span class="ln">' + esc(a.name || a.item_type) + (a.size ? ' (' + esc(a.size) + ')' : '') + '</span><span class="ln">' + esc(propName(a.property_id)) + ' / ' + esc(roomLabel(a)) + '</span>';
       sheet.appendChild(d);
       new QRCode(d.querySelector('.qr'), { text: qrLink(a.id), width: 113, height: 113, correctLevel: QRCode.CorrectLevel.M });
     });
@@ -833,7 +845,7 @@ async function viewPrint(preId) {
   $('#lprev').disabled = true; $('#lnext').disabled = true;
 
   sb.from('assets').select('id', { count: 'exact', head: true }).is('property_id', null).then(({ count }) => {
-    if (count && $('#un')) { $('#un').innerHTML = `<b>${count}</b> asset(s) are waiting to be assigned and cannot print yet. <button class="btn sec" id="seeun" style="margin:0">Show them</button>`; $('#seeun').onclick = () => { L.fp = '__none'; L.q = ''; L.ft = ''; L.fs = ''; L.fa = ''; L.fd = ''; L.page = 0; go('#/assets'); }; }
+    if (count && $('#un')) { $('#un').innerHTML = `<b>${count}</b> asset(s) are waiting to be assigned and cannot print yet. <button class="btn sec" id="seeun" style="margin:0">Show them</button>`; $('#seeun').onclick = () => { L.fp = '__none'; L.q = ''; L.ft = ''; L.fs = ''; L.fa = ''; L.fd = ''; L.fr = ''; L.page = 0; go('#/assets'); }; }
   });
   if (S.props.length) { fillRooms(); await fillAssets(); }
   if (st.ids) {
@@ -870,6 +882,8 @@ function viewScan() {
 /* ---------- Import from Excel / CSV ---------- */
 const IMPORT_COLS = [
   ['item_type', 'Yes', 'What the item is', 'Chair, Split AC, Ceiling Fan'],
+  ['name', 'No', 'Specific name of the item', 'Executive chair'],
+  ['size', 'No', 'Size', '6 x 3 ft, King, 1.5 ton'],
   ['description', 'No', 'Make / model / serial', 'Voltas 1.5 ton'],
   ['property', 'If placed', 'Property name, spelled exactly as in the Properties tab. Empty = not assigned yet', 'Property A'],
   ['room', 'If placed', 'Room / area name exactly as in the app, or the word STORE for the property store. Empty = not assigned yet', '101, Lobby, STORE'],
@@ -957,7 +971,7 @@ function validateRows(rawRows, autoRooms) {
     rows.push({
       qty, roomKey: roomName ? prop.id + '|' + roomName.toLowerCase() : null,
       data: {
-        item_type: item, description: String(r.description ?? '').trim() || null, property_id: prop ? prop.id : null, room_id: roomId, in_store: inStore,
+        item_type: item, name: String(r.name ?? '').trim() || null, size: String(r.size ?? '').trim() || null, description: String(r.description ?? '').trim() || null, property_id: prop ? prop.id : null, room_id: roomId, in_store: inStore,
         status, purchase_date: pd.val, purchase_cost: pc.val, vendor: String(r.vendor ?? '').trim() || null,
         warranty_until: wu.val, notes: String(r.notes ?? '').trim() || null
       }
@@ -969,9 +983,9 @@ function validateRows(rawRows, autoRooms) {
 
 function templateCsv() {
   return IMPORT_COLS.map(c => c[0]).join(',') + '\n' +
-    'Chair,Wooden dining chair,Property A,Lobby,working,2025-04-15,2500,ABC Furniture,2027-04-14,,10\n' +
-    'Split AC,Voltas 1.5 ton,Property A,STORE,working,2024-06-01,38000,XYZ Traders,2029-05-31,Spare unit,1\n' +
-    'Ceiling Fan,Purchased - not placed yet,,,,2025-09-10,3200,Fan Mart,2027-09-09,,20\n';
+    'Chair,Dining chair,Standard,Wooden dining chair,Property A,Lobby,working,2025-04-15,2500,ABC Furniture,2027-04-14,,10\n' +
+    'Split AC,Bedroom AC,1.5 ton,Voltas 1.5 ton,Property A,STORE,working,2024-06-01,38000,XYZ Traders,2029-05-31,Spare unit,1\n' +
+    'Ceiling Fan,,1200 mm,Purchased - not placed yet,,,,2025-09-10,3200,Fan Mart,2027-09-09,,20\n';
 }
 
 function viewImport() {
@@ -1044,70 +1058,264 @@ async function runImport(res) {
 }
 
 /* ---------- Properties and rooms (Procurement) ---------- */
-function viewProperties() {
-  view.innerHTML = `<div class="card"><h2>Properties</h2>
-    <div class="tw"><table><thead><tr><th>Name</th><th>Latitude</th><th>Longitude</th><th>Audit radius</th><th>Store location</th><th>Rooms</th><th></th></tr></thead><tbody>
-    ${S.props.map(p => `<tr><td>${esc(p.name)}</td><td>${p.latitude ?? '-'}</td><td>${p.longitude ?? '-'}</td><td>${p.audit_radius_m || 500} m</td><td>${esc(p.store_location) || '-'}</td><td>${S.rooms.filter(r => r.property_id === p.id).length}</td><td><button class="btn sec" data-e="${p.id}" style="margin:0">Edit</button></td></tr>`).join('') || '<tr><td colspan="6" class="mute">No properties yet.</td></tr>'}
-    </tbody></table></div></div>
-    <div class="card"><h2 id="ft">Add property</h2>
+/* ---------- To audit: what is still not audited ---------- */
+const AUD = { prop: '', days: 'never' };
+async function viewAudit() {
+  if (!S.props.length) { view.innerHTML = '<div class="card"><p>No properties yet.</p></div>'; return; }
+  if (!AUD.prop || !propById(AUD.prop)) AUD.prop = S.props[0].id;
+  const sinceDate = () => AUD.days === 'never' ? null : new Date(Date.now() - Number(AUD.days) * 864e5).toISOString().slice(0, 10);
+  view.innerHTML = `<div class="card"><h2>To audit</h2>
     <div class="row">
-      <div><label>Property name *</label><input id="pn"></div>
-      <div><label>Store location (name or description)</label><input id="ps" placeholder="e.g. Basement store room"></div>
-      <div><label>Latitude</label><input id="la" type="number" step="any"></div>
-      <div><label>Longitude</label><input id="lo" type="number" step="any"></div>
-      <div><label>Audit radius (metres)</label><input id="rad" type="number" min="50" step="10" value="500"></div>
+      <div><label>Property</label><select id="aprop">${S.props.map(p => `<option value="${p.id}" ${p.id === AUD.prop ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></div>
+      <div><label>Count an asset as not audited if</label><select id="adays">
+        <option value="never" ${AUD.days === 'never' ? 'selected' : ''}>it was never audited</option>
+        ${[30, 90, 180, 365].map(d => `<option value="${d}" ${String(d) === String(AUD.days) ? 'selected' : ''}>it was not audited in the last ${d} days</option>`).join('')}
+      </select></div>
     </div>
-    <p class="mute">Auditors must be within this distance of the property pin to mark an asset audited. Use a larger value for a big campus.</p>
-    <button class="btn sec" id="here">Use my current location</button><button class="btn" id="sp">Save property</button><button class="btn sec" id="np">Clear</button></div>
-    <div class="card"><h2>Rooms / areas</h2>
-    <label>Property</label><select id="rp">${S.props.map(p => `<option value="${p.id}">${esc(p.name)}</option>`).join('')}</select>
-    <div id="rl" style="margin:10px 0"></div>
-    <label>Add rooms (separate with commas or new lines; words like Lobby are fine)</label><textarea id="rn" placeholder="101, 102, Lobby, Gym"></textarea>
-    <button class="btn" id="ar">Add rooms</button></div>`;
-  let editing = null;
-  const clear = () => { editing = null; ['pn', 'ps', 'la', 'lo'].forEach(i => { $('#' + i).value = ''; }); $('#rad').value = 500; $('#ft').textContent = 'Add property'; };
-  $('#np').onclick = clear;
-  view.onclick = e => {
-    const b = e.target.closest('button[data-e]'); if (b) {
-      const p = propById(b.dataset.e); editing = p.id; $('#ft').textContent = 'Edit property';
-      $('#pn').value = p.name; $('#ps').value = p.store_location || ''; $('#la').value = p.latitude ?? ''; $('#lo').value = p.longitude ?? ''; $('#rad').value = p.audit_radius_m || 500;
-      $('#pn').scrollIntoView();
-    }
+    <p id="asum" class="mute">Loading...</p>
+    <div class="tw"><table><thead><tr><th>Room / area</th><th class="num">Assets</th><th class="num">Not audited</th></tr></thead><tbody id="arows"></tbody></table></div>
+    <p class="mute">Tap a room to see which assets in it are not audited. Then scan each one at the property and press Audited OK.</p></div>`;
+  const openList = (roomId, roomName) => {
+    Object.assign(L, { page: 0, q: '', fp: AUD.prop, ft: '', fs: '', fr: roomId || '', frn: roomName || '' });
+    const d = sinceDate(); L.fa = d ? 'before' : 'no'; L.fd = d || '';
+    go('#/assets');
   };
+  const draw = async () => {
+    const { data, error } = await sb.rpc('audit_pending', { p_property: AUD.prop, p_before: sinceDate() });
+    if (error) return fail(error);
+    const rows = (data || []).filter(r => r.total > 0 || !r.in_store).sort((x, y) => (y.pending - x.pending) || x.room_name.localeCompare(y.room_name, undefined, { numeric: true }));
+    const total = rows.reduce((n, r) => n + Number(r.total), 0), pend = rows.reduce((n, r) => n + Number(r.pending), 0);
+    $('#asum').innerHTML = `<b>${pend}</b> of ${total} asset(s) at ${esc(propName(AUD.prop))} are not audited. ${pend ? '<a href="#" id="aall">Show all of them</a>' : ''}`;
+    $('#arows').innerHTML = rows.map((r, i) => `<tr class="click" data-i="${i}"><td>${esc(r.room_name)}</td><td class="num">${r.total}</td><td class="num">${r.pending ? '<b>' + r.pending + '</b>' : '<span class="mute">0</span>'}</td></tr>`).join('') || '<tr><td colspan="3" class="mute">No rooms or assets yet.</td></tr>';
+    $('#arows').onclick = e => { const tr = e.target.closest('tr[data-i]'); if (tr) { const r = rows[Number(tr.dataset.i)]; openList(r.in_store ? 'STORE' : r.room_id, r.room_name); } };
+    if ($('#aall')) $('#aall').onclick = e => { e.preventDefault(); openList('', ''); };
+  };
+  $('#aprop').onchange = () => { AUD.prop = $('#aprop').value; draw(); };
+  $('#adays').onchange = () => { AUD.days = $('#adays').value; draw(); };
+  draw();
+}
+
+/* ---------- Audit report: audited vs not audited, on screen + Excel ---------- */
+const REP = { prop: '' };
+async function viewReport() {
+  const sinceDate = () => AUD.days === 'never' ? null : new Date(Date.now() - Number(AUD.days) * 864e5).toISOString().slice(0, 10);
+  const pct = (a, t) => Number(t) ? Math.round(1000 * Number(a) / Number(t)) / 10 : null;
+  const dt = x => x ? new Date(x).toLocaleDateString() : '';
+  if (REP.prop && !propById(REP.prop)) REP.prop = '';
+  view.innerHTML = `<div class="card"><h2>Audit report</h2>
+    <div class="row">
+      <div><label>Property</label><select id="rprop"><option value="">All properties</option>${S.props.map(p => `<option value="${p.id}" ${p.id === REP.prop ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}</select></div>
+      <div><label>An asset counts as audited if it was</label><select id="rdays">
+        <option value="never" ${AUD.days === 'never' ? 'selected' : ''}>audited at least once</option>
+        ${[30, 90, 180, 365].map(d => `<option value="${d}" ${String(d) === String(AUD.days) ? 'selected' : ''}>audited in the last ${d} days</option>`).join('')}
+      </select></div>
+    </div>
+    <button class="btn" id="rxl">Download Excel</button>
+    <p class="mute">Assets that are not assigned to a property yet cannot be audited and are not counted.</p>
+    <div id="rbody"><p class="mute">Loading...</p></div></div>`;
+  const notAuditedQ = (count, head) => {
+    let q = sb.from('assets').select('id,tag_no,item_type,name,size,property_id,room_id,in_store,status,last_audited_at', count ? { count: 'exact' } : undefined).not('property_id', 'is', null);
+    if (REP.prop) q = q.eq('property_id', REP.prop);
+    const d = sinceDate();
+    q = d ? q.or(`last_audited_at.is.null,last_audited_at.lt.${d}`) : q.is('last_audited_at', null);
+    return head ? q : q.order('tag_no');
+  };
+  let report = null;
+  const load = async () => {
+    $('#rbody').innerHTML = '<p class="mute">Loading...</p>';
+    const [rp, na] = await Promise.all([sb.rpc('audit_report', { p_before: sinceDate() }), notAuditedQ(true).range(0, 199)]);
+    if (rp.error) return fail(rp.error); if (na.error) return fail(na.error);
+    const rows = rp.data || [], props = new Map();
+    rows.forEach(r => {
+      const x = props.get(r.property_id) || { id: r.property_id, name: r.property_name, total: 0, audited: 0, last: null };
+      x.total += Number(r.total); x.audited += Number(r.audited); if (r.last_audit && (!x.last || r.last_audit > x.last)) x.last = r.last_audit;
+      props.set(r.property_id, x);
+    });
+    const plist = [...props.values()].sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+    const shown = REP.prop ? plist.filter(x => x.id === REP.prop) : plist;
+    const T = shown.reduce((n, x) => n + x.total, 0), A = shown.reduce((n, x) => n + x.audited, 0);
+    const roomRows = rows.filter(r => (!REP.prop || r.property_id === REP.prop) && (Number(r.total) > 0 || (!r.in_store && r.room_name !== '(no room)')))
+      .sort((x, y) => x.property_name.localeCompare(y.property_name, undefined, { numeric: true }) || (x.in_store - y.in_store) || x.room_name.localeCompare(y.room_name, undefined, { numeric: true }));
+    report = { shown, roomRows, T, A, pct };
+    const pc = v => v === null ? '-' : v + '%';
+    $('#rbody').innerHTML = `
+      <div class="stats"><div class="stat"><b>${T}</b><span>Assets placed</span></div><div class="stat"><b>${A}</b><span>Audited</span></div><div class="stat"><b>${T - A}</b><span>Not audited</span></div><div class="stat"><b>${pc(pct(A, T))}</b><span>Audited</span></div></div>
+      <h3>By property</h3>
+      <div class="tw"><table><thead><tr><th>Property</th><th class="num">Assets</th><th class="num">Audited</th><th class="num">Not audited</th><th class="num">% audited</th><th>Last audit</th></tr></thead><tbody>
+      ${shown.map(x => `<tr class="click" data-p="${x.id}"><td>${esc(x.name)}</td><td class="num">${x.total}</td><td class="num">${x.audited}</td><td class="num">${x.total - x.audited}</td><td class="num">${pc(pct(x.audited, x.total))}</td><td>${esc(dt(x.last))}</td></tr>`).join('') || '<tr><td colspan="6" class="mute">No data.</td></tr>'}</tbody></table></div>
+      ${REP.prop ? `<h3>By room</h3><div class="tw"><table><thead><tr><th>Room / area</th><th class="num">Assets</th><th class="num">Audited</th><th class="num">Not audited</th><th class="num">% audited</th><th>Last audit</th></tr></thead><tbody>
+      ${roomRows.map(r => `<tr><td>${esc(r.room_name)}</td><td class="num">${r.total}</td><td class="num">${r.audited}</td><td class="num">${r.total - r.audited}</td><td class="num">${pc(pct(r.audited, r.total))}</td><td>${esc(dt(r.last_audit))}</td></tr>`).join('')}</tbody></table></div>` : '<p class="mute">Pick a property above to see the room-by-room breakdown.</p>'}
+      <h3>Not audited assets</h3>
+      <p class="mute">${na.count ? `Showing ${na.data.length} of ${na.count}.${na.count > na.data.length ? ' The Excel file has the full list.' : ''}` : 'Nothing is waiting to be audited.'}</p>
+      <div class="tw"><table><thead><tr><th>Tag</th><th>Item</th><th>Property</th><th>Room</th><th>Status</th><th>Last audited</th></tr></thead><tbody>
+      ${na.data.map(a => `<tr class="click" data-id="${a.id}"><td>${tagOf(a)}</td><td>${esc(a.item_type)}${a.name ? '<br><span class="mute">' + esc(a.name) + '</span>' : ''}</td><td>${esc(propName(a.property_id))}</td><td>${esc(roomLabel(a))}</td><td>${badge(a.status)}</td><td>${a.last_audited_at ? esc(dt(a.last_audited_at)) : '<span class="mute">never</span>'}</td></tr>`).join('')}</tbody></table></div>`;
+    $('#rbody').onclick = e => {
+      const tr = e.target.closest('tr[data-p],tr[data-id]'); if (!tr) return;
+      if (tr.dataset.id) go('#/asset/' + tr.dataset.id); else { REP.prop = tr.dataset.p; $('#rprop').value = REP.prop; load(); }
+    };
+  };
+  const toExcel = async () => {
+    const btn = $('#rxl'); btn.disabled = true;
+    try {
+      if (!report) await load();
+      const defn = AUD.days === 'never' ? 'audited at least once' : 'audited in the last ' + AUD.days + ' days';
+      const wb = XLSX.utils.book_new();
+      const sum = [['Audit report'], ['Generated', new Date().toLocaleString()], ['Property', REP.prop ? propName(REP.prop) : 'All properties'], ['Counted as audited if', defn], [],
+        ['Property', 'Assets', 'Audited', 'Not audited', '% audited', 'Last audit']];
+      report.shown.forEach(x => sum.push([x.name, x.total, x.audited, x.total - x.audited, pct(x.audited, x.total), dt(x.last)]));
+      sum.push(['Total', report.T, report.A, report.T - report.A, pct(report.A, report.T), '']);
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(sum), 'By property');
+      const rm = [['Property', 'Room / area', 'Assets', 'Audited', 'Not audited', '% audited', 'Last audit']];
+      report.roomRows.forEach(r => rm.push([r.property_name, r.room_name, Number(r.total), Number(r.audited), r.total - r.audited, pct(r.audited, r.total), dt(r.last_audit)]));
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(rm), 'By room');
+      const na = [['Tag', 'Item type', 'Name', 'Size', 'Property', 'Room / area', 'Status', 'Last audited']];
+      for (let from = 0; ; from += 1000) {
+        btn.textContent = `Preparing... ${na.length - 1} assets`;
+        const { data, error } = await notAuditedQ(false).range(from, from + 999); if (error) throw error;
+        data.forEach(a => na.push([tagOf(a), a.item_type, a.name || '', a.size || '', propName(a.property_id), roomLabel(a), a.status || '', a.last_audited_at ? dt(a.last_audited_at) : 'never']));
+        if (data.length < 1000) break;
+      }
+      XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(na), 'Not audited assets');
+      XLSX.writeFile(wb, 'audit-report-' + new Date().toISOString().slice(0, 10) + '.xlsx');
+      toast('Excel file downloaded');
+    } catch (e) { fail(e); }
+    btn.disabled = false; btn.textContent = 'Download Excel';
+  };
+  $('#rprop').onchange = () => { REP.prop = $('#rprop').value; load(); };
+  $('#rdays').onchange = () => { AUD.days = $('#rdays').value; load(); };
+  $('#rxl').onclick = toExcel;
+  load();
+}
+
+/* ---------- Properties: property -> rooms -> assets, on one screen ---------- */
+const propFormHtml = `<div class="row">
+    <div><label>Property name *</label><input id="pn"></div>
+    <div><label>Store location (name or description)</label><input id="ps" placeholder="e.g. Basement store room"></div>
+    <div><label>Latitude</label><input id="la" type="number" step="any"></div>
+    <div><label>Longitude</label><input id="lo" type="number" step="any"></div>
+    <div><label>Audit radius (metres)</label><input id="rad" type="number" min="50" step="10" value="500"></div>
+  </div>
+  <p class="mute">Auditors must be within this distance of the property pin to mark an asset audited. Use a larger value for a big campus.</p>
+  <button class="btn sec" id="here">Use my current location</button><button class="btn" id="sp">Save property</button>`;
+function wirePropForm(p, after) {
+  $('#pn').value = p ? p.name : ''; $('#ps').value = p ? (p.store_location || '') : ''; $('#la').value = p ? (p.latitude ?? '') : ''; $('#lo').value = p ? (p.longitude ?? '') : ''; $('#rad').value = p ? (p.audit_radius_m || 500) : 500;
   $('#here').onclick = async () => {
-    toast('Getting location...'); const p = await getPos(12000);
-    if (!p) return fail(new Error('Could not get location. Allow location access.'));
-    $('#la').value = p.lat.toFixed(6); $('#lo').value = p.lng.toFixed(6); toast('Location filled (accuracy about ' + Math.round(p.acc) + ' m)');
+    toast('Getting location...'); const pos = await getPos(12000);
+    if (!pos) return fail(new Error('Could not get location. Allow location access.'));
+    $('#la').value = pos.lat.toFixed(6); $('#lo').value = pos.lng.toFixed(6); toast('Location filled (accuracy about ' + Math.round(pos.acc) + ' m)');
   };
   $('#sp').onclick = async () => {
     try {
       if (!$('#pn').value.trim()) return fail(new Error('Property name is required'));
       const row = { name: $('#pn').value.trim(), store_location: $('#ps').value.trim() || null, latitude: $('#la').value === '' ? null : Number($('#la').value), longitude: $('#lo').value === '' ? null : Number($('#lo').value), audit_radius_m: Math.max(50, Math.floor(Number($('#rad').value) || 500)) };
-      const { error } = editing ? await sb.from('properties').update(row).eq('id', editing) : await sb.from('properties').insert(row);
+      const { error } = p ? await sb.from('properties').update(row).eq('id', p.id) : await sb.from('properties').insert(row);
       if (error) throw error;
-      await loadMaster(); toast('Property saved'); viewProperties();
+      await loadMaster(); toast('Property saved'); after();
     } catch (e) { fail(e); }
   };
-  const drawRooms = () => {
-    const rooms = S.rooms.filter(r => r.property_id === $('#rp').value);
-    $('#rl').innerHTML = rooms.length ? rooms.map(r => `<span class="badge working" style="margin:2px">${esc(r.name)} <a href="#" data-dr="${r.id}" style="color:inherit">x</a></span>`).join(' ') : '<span class="mute">No rooms yet.</span>';
+}
+
+async function viewProperties(arg, sub) {
+  const p = arg ? propById(arg) : null;
+  if (arg && !p) { go('#/properties'); return; }
+  if (!arg) return propsHome();
+  if (sub) return roomAssets(p, sub);
+  return propDetail(p);
+}
+
+async function propsHome() {
+  const full = can('procurement');
+  const { data: s, error } = await sb.rpc('asset_summary'); if (error) throw error;
+  const by = new Map(s.by_property.map(x => [x.id, x]));
+  view.innerHTML = `<div class="card"><h2>Properties ${full ? '<button class="btn" id="addp" style="float:right;margin:0">+ Add property</button>' : ''}</h2>
+    <p class="mute">Tap a property to see its rooms and assets${full ? ', and to edit it' : ''}.</p>
+    <div class="tw"><table><thead><tr><th>Property</th><th class="num">Assets</th><th class="num">Working</th><th class="num">Repairable</th><th class="num">Damaged</th><th class="num">Audited</th><th class="num">Rooms</th></tr></thead><tbody>
+    ${S.props.map(p => { const x = by.get(p.id) || { total: 0, working: 0, repairable: 0, damaged: 0, audited: 0 }; return `<tr class="click" data-id="${p.id}"><td>${esc(p.name)}</td><td class="num">${x.total}</td><td class="num">${x.working}</td><td class="num">${x.repairable}</td><td class="num">${x.damaged}</td><td class="num">${x.audited}</td><td class="num">${S.rooms.filter(r => r.property_id === p.id).length}</td></tr>`; }).join('') || '<tr><td colspan="7" class="mute">No properties yet.</td></tr>'}
+    ${s.unassigned.total ? `<tr class="click" data-un="1"><td><i>Not assigned to a property yet</i></td><td class="num">${s.unassigned.total}</td><td colspan="5"></td></tr>` : ''}
+    </tbody></table></div></div>
+    ${full ? '<div class="card" id="addcard" style="display:none"><h2>Add property</h2>' + propFormHtml + '</div>' : ''}`;
+  view.querySelector('tbody').onclick = e => {
+    const tr = e.target.closest('tr'); if (!tr) return;
+    if (tr.dataset.un) { Object.assign(L, { page: 0, q: '', fp: '__none', ft: '', fs: '', fa: '', fd: '', fr: '' }); go('#/assets'); }
+    else go('#/properties/' + tr.dataset.id);
   };
-  const delRoom = async id => {
-    if (!confirm('Delete this room? Assets in it will show no room.')) return;
-    const { error } = await sb.from('rooms').delete().eq('id', id); if (error) return fail(error);
-    await loadMaster(); drawRooms();
+  if (full) {
+    wirePropForm(null, propsHome);
+    $('#addp').onclick = () => { $('#addcard').style.display = ''; $('#pn').focus(); };
+  }
+}
+
+async function propDetail(p) {
+  const full = can('procurement');
+  const { data, error } = await sb.rpc('audit_pending', { p_property: p.id, p_before: null }); if (error) throw error;
+  const rows = (data || []).filter(r => !r.in_store || Number(r.total) > 0).sort((x, y) => x.in_store - y.in_store || x.room_name.localeCompare(y.room_name, undefined, { numeric: true }));
+  const total = rows.reduce((n, r) => n + Number(r.total), 0), pend = rows.reduce((n, r) => n + Number(r.pending), 0);
+  view.innerHTML = `<div class="card"><p><a href="#/properties">&larr; All properties</a></p>
+    <h2>${esc(p.name)}</h2>
+    <p class="mute">${p.latitude != null ? 'Map pin saved' : 'No map pin yet'} &middot; audit radius ${p.audit_radius_m || 500} m &middot; Store: ${esc(p.store_location) || '-'}</p>
+    <p><b>${total}</b> asset(s) in rooms and store, <b>${pend}</b> never audited.</p>
+    <button class="btn sec" id="pall">All assets of this property</button><button class="btn sec" id="paud">To audit</button></div>
+    <div class="card"><h2>Rooms / areas</h2>
+    <div class="tw"><table><thead><tr><th>Room / area</th><th class="num">Assets</th><th class="num">Never audited</th>${canEdit() ? '<th></th>' : ''}</tr></thead><tbody>
+    ${rows.map(r => `<tr class="click" data-r="${r.in_store ? 'STORE' : r.room_id}"><td>${esc(r.room_name)}</td><td class="num">${r.total}</td><td class="num">${r.pending}</td>${canEdit() ? `<td>${r.in_store ? '' : `<a href="#" data-dr="${r.room_id}">delete</a>`}</td>` : ''}</tr>`).join('') || '<tr><td colspan="4" class="mute">No rooms yet.</td></tr>'}
+    </tbody></table></div>
+    ${canEdit() ? `<label>Add rooms (separate with commas or new lines; words like Lobby are fine)</label><textarea id="rn" placeholder="101, 102, Lobby, Gym"></textarea><button class="btn" id="ar">Add rooms</button>` : ''}</div>
+    ${full ? '<details class="card"><summary><b>Edit property</b></summary>' + propFormHtml + '</details>' : ''}`;
+  $('#pall').onclick = () => { Object.assign(L, { page: 0, q: '', fp: p.id, ft: '', fs: '', fa: '', fd: '', fr: '' }); go('#/assets'); };
+  $('#paud').onclick = () => { AUD.prop = p.id; go('#/audit'); };
+  view.querySelector('tbody').onclick = async e => {
+    const d = e.target.closest('[data-dr]');
+    if (d) {
+      e.preventDefault();
+      if (!confirm('Delete this room? Assets in it will show no room.')) return;
+      const { error: er } = await sb.from('rooms').delete().eq('id', d.dataset.dr); if (er) return fail(er);
+      await loadMaster(); return propDetail(p);
+    }
+    const tr = e.target.closest('tr[data-r]'); if (tr) go('#/properties/' + p.id + '/' + tr.dataset.r);
   };
-  $('#rl').onclick = e => { const d = e.target.closest('[data-dr]'); if (d) { e.preventDefault(); delRoom(d.dataset.dr); } };
-  $('#rp').onchange = drawRooms; drawRooms();
-  $('#ar').onclick = async () => {
+  if (canEdit()) $('#ar').onclick = async () => {
     try {
-      const names = [...new Set($('#rn').value.split(/[,\n]/).map(s => s.trim()).filter(Boolean))];
-      if (!names.length || !$('#rp').value) return;
-      const { error } = await sb.from('rooms').upsert(names.map(n => ({ property_id: $('#rp').value, name: n })), { onConflict: 'property_id,name', ignoreDuplicates: true });
-      if (error) throw error;
-      const keep = $('#rp').value; await loadMaster(); $('#rn').value = ''; $('#rp').value = keep; drawRooms(); toast(names.length + ' room(s) added');
+      const names = [...new Set($('#rn').value.split(/[,\n]/).map(x => x.trim()).filter(Boolean))];
+      if (!names.length) return;
+      const { error: er } = await sb.from('rooms').upsert(names.map(n => ({ property_id: p.id, name: n })), { onConflict: 'property_id,name', ignoreDuplicates: true });
+      if (er) throw er;
+      await loadMaster(); toast(names.length + ' room(s) added'); propDetail(p);
     } catch (e) { fail(e); }
   };
+  if (full) wirePropForm(p, () => propDetail(propById(p.id)));
+}
+
+async function roomAssets(p, sub) {
+  const isStore = sub === 'STORE', room = isStore ? null : roomById(sub), name = isStore ? 'Store' : (room ? room.name : '?');
+  let page = 0;
+  view.innerHTML = `<div class="card"><p><a href="#/properties/${p.id}">&larr; ${esc(p.name)}</a></p>
+    <h2>${esc(p.name)} / ${esc(name)}</h2>
+    <p class="mute" id="rc"></p>
+    ${canEdit() ? '<button class="btn sec" id="rprint">Print labels for this room</button>' : ''}
+    <div class="tw"><table><thead><tr><th>Tag</th><th>Item</th><th>Size</th><th>Status</th><th>Last audited</th></tr></thead><tbody id="rrows"></tbody></table></div>
+    <button class="btn sec" id="rprev">Previous</button><button class="btn sec" id="rnext">Next</button></div>`;
+  const q = () => { let x = sb.from('assets').select('*', { count: 'exact' }).eq('property_id', p.id); return isStore ? x.eq('in_store', true) : x.eq('room_id', sub); };
+  const draw = async () => {
+    const from = page * PAGE;
+    const { data, count, error } = await q().order('tag_no').range(from, from + PAGE - 1); if (error) return fail(error);
+    $('#rc').textContent = count ? `Showing ${from + 1}-${from + data.length} of ${count}` : 'No assets in this room yet.';
+    $('#rrows').innerHTML = data.map(a => `<tr class="click" data-id="${a.id}"><td>${tagOf(a)}</td><td>${esc(a.item_type)}${a.name ? '<br><span class="mute">' + esc(a.name) + '</span>' : ''}</td><td>${esc(a.size)}</td><td>${badge(a.status)}</td><td>${a.last_audited_at ? esc(new Date(a.last_audited_at).toLocaleDateString()) : '<span class="mute">never</span>'}</td></tr>`).join('');
+    $('#rprev').disabled = page === 0; $('#rnext').disabled = from + data.length >= count;
+  };
+  $('#rrows').onclick = e => { const tr = e.target.closest('tr[data-id]'); if (tr) go('#/asset/' + tr.dataset.id); };
+  $('#rprev').onclick = () => { page--; draw(); }; $('#rnext').onclick = () => { page++; draw(); };
+  if ($('#rprint')) $('#rprint').onclick = async () => {
+    try {
+      let ids = [];
+      for (let from = 0; ; from += 1000) {
+        const { data, error } = await q().select('id').order('tag_no').range(from, from + 999); if (error) throw error;
+        ids = ids.concat(data.map(x => x.id)); if (data.length < 1000) break;
+      }
+      if (!ids.length) return fail(new Error('No assets in this room'));
+      S.printPre = { ids }; go('#/print');
+    } catch (e) { fail(e); }
+  };
+  draw();
 }
 
 /* ---------- Users (Procurement) ---------- */
