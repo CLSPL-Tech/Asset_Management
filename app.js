@@ -14,9 +14,9 @@ const LABELS_PER = 90;  // labels per print batch (6 A4 sheets of 15)
 const CHUNK = 500;      // rows per request when creating many assets
 
 const TABS = {
-  procurement: [['summary', 'Summary'], ['assets', 'Assets'], ['print', 'Print QR'], ['import', 'Import'], ['scan', 'Scan'], ['audit', 'To audit'], ['report', 'Report'], ['users', 'Users']],
-  projects: [['summary', 'Summary'], ['assets', 'Assets'], ['print', 'Print QR'], ['import', 'Import'], ['scan', 'Scan'], ['audit', 'To audit'], ['report', 'Report']],
-  auditor: [['scan', 'Scan'], ['audit', 'To audit'], ['report', 'Report'], ['assets', 'Assets'], ['summary', 'Summary']]
+  procurement: [['summary', 'Summary'], ['assets', 'Assets & Properties'], ['print', 'Print QR'], ['import', 'Import'], ['scan', 'Scan'], ['audit', 'To audit'], ['report', 'Report'], ['users', 'Users']],
+  projects: [['summary', 'Summary'], ['assets', 'Assets & Properties'], ['print', 'Print QR'], ['import', 'Import'], ['scan', 'Scan'], ['audit', 'To audit'], ['report', 'Report']],
+  auditor: [['scan', 'Scan'], ['audit', 'To audit'], ['report', 'Report'], ['assets', 'Assets & Properties'], ['summary', 'Summary']]
 };
 const ROLE_LABEL = { pending: 'Waiting for approval', procurement: 'Procurement', projects: 'Projects team', auditor: 'Auditor' };
 const STATUSES = ['working', 'repairable', 'damaged'];
@@ -257,7 +257,7 @@ async function viewAssets() {
   const bulkOn = () => L.fp === '__none' && canEdit();
   const canDel = can('procurement');
   view.innerHTML = `<div class="card">
-    <h2>Assets ${canEdit() ? '<button class="btn" id="add" style="float:right;margin:0">+ Add asset</button>' : ''}</h2>
+    <h2>Assets &amp; Properties ${canEdit() ? '<button class="btn" id="add" style="float:right;margin:0">+ Add asset</button>' : ''}</h2>
     <label>Property</label><div id="pchips" class="chips"><span class="mute">Loading...</span></div>
     <div id="rchips" class="chips"></div>
     <div class="row">
