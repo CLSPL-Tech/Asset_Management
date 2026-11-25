@@ -59,6 +59,21 @@
     .sheet { grid-template-columns:repeat(3,var(--lbl)); width:210mm; height:296mm; box-sizing:border-box; margin:0; padding:13mm 0 0; gap:5mm; align-content:start; page-break-after:always; break-after:page; overflow:hidden; }
     .sheet:last-child { page-break-after:auto; break-after:auto; }
   }
+
+  /* v10 colour theme and charts */
+  :root { --bg:#eef2fb; --brand:#2563eb; --ok:#15803d; --warn:#b45309; --bad:#be123c; }
+  header { background:linear-gradient(90deg,#1e3a8a,#2563eb); color:#fff; border-bottom:0; } header small { color:#dbe7ff; }
+  nav { background:#f8faff; } nav button { border-color:#c7d6fb; color:#1e3a8a; } nav button.on { background:#2563eb; border-color:#2563eb; color:#fff; }
+  .card { border-top:3px solid #c7d6fb; } h2 { color:#1e3a8a; }
+  .stat { border-left:5px solid var(--brand); } .stat:nth-child(5n+2) { border-left-color:#7c3aed; } .stat:nth-child(5n+3) { border-left-color:#16a34a; } .stat:nth-child(5n+4) { border-left-color:#f59e0b; } .stat:nth-child(5n+5) { border-left-color:#e11d48; }
+  button.btn.sec { border-color:#c7d6fb; color:#1e3a8a; } button.btn.sm { padding:5px 10px; font-size:13px; margin:0; }
+  tr.off td { opacity:.55; }
+  .grid2 { display:grid; grid-template-columns:repeat(auto-fit,minmax(300px,1fr)); gap:14px; }
+  .donut { display:flex; align-items:center; gap:16px; flex-wrap:wrap; } .lg { font-size:13px; margin:3px 0; } .lg i, .lg2 i { display:inline-block; width:11px; height:11px; border-radius:3px; margin-right:6px; vertical-align:-1px; }
+  .lg2 { display:flex; gap:14px; font-size:13px; margin-top:8px; }
+  .hb { display:flex; flex-direction:column; gap:7px; } .hbr { display:grid; grid-template-columns:minmax(70px,150px) 1fr 54px; gap:8px; align-items:center; font-size:13px; }
+  .hbl { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; } .hbt { background:#eef2fb; border-radius:6px; height:16px; overflow:hidden; }
+  .hbw { display:flex; height:100%; border-radius:6px; overflow:hidden; } .hbw span { display:block; height:100%; } .hbn { text-align:right; font-weight:600; }
 </style>
 </head>
 <body>

@@ -1,0 +1,4 @@
+item_type,category,name,size,description,property,room,status,purchase_date,purchase_cost,vendor,warranty_until,notes,quantity
+Chair,Furniture,Dining chair,Standard,Wooden dining chair,Property A,Lobby,working,2025-04-15,2500,ABC Furniture,2027-04-14,,10
+Split AC,Electrical,Bedroom AC,1.5 ton,Voltas 1.5 ton,Property A,STORE,working,2024-06-01,38000,XYZ Traders,2029-05-31,Spare unit,1
+Ceiling Fan,,,1200 mm,Purchased - not placed yet,,,,2025-09-10,3200,Fan Mart,2027-09-09,,20
